@@ -153,8 +153,9 @@ Audit Logging: Every document ingestion, authentication attempt, and AI query cr
 
 Vector Isolation: All vectors reside strictly within PostgreSQL tables bounded by organization and project foreign keys.
 
-## 🚀 Live Demo & Documentation
+🚀 Live Demo & Documentation
+Live Application UI: multi-tenant-rag-engine.streamlit.app
 
-- **Live Application UI**: [https://multi-tenant-rag-engine.streamlit.app](https://multi-tenant-rag-engine.streamlit.app)
-- **Interactive API Docs (Swagger)**: [https://multi-tenant-rag-engine.onrender.com/api/docs/](https://multi-tenant-rag-engine.onrender.com/api/docs/)
-- **Django Admin Portal**: [https://multi-tenant-rag-engine.onrender.com/admin/](https://multi-tenant-rag-engine.onrender.com/admin/)
+Interactive API Docs (Swagger): multi-tenant-rag-engine.onrender.com/api/docs/
+
+Django Admin Portal: multi-tenant-rag-engine.onrender.com/admin/
