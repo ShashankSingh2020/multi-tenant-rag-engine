@@ -22,20 +22,21 @@ Modern enterprises need domain-specific AI search over proprietary documents wit
 
 ## 🏗️ System Architecture
 
+```text
 ┌─────────────────────────────────────────────────────────────┐
 │                    Streamlit Web Client                     │
 │    (Workspace Switcher, Multi-Turn Chat, Real-Time Quotas)  │
 └──────────────────────────────┬──────────────────────────────┘
-│ HTTP / JWT Bearer
-▼
+                               │ HTTP / JWT Bearer
+                               ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                    Django REST Framework                    │
 │   (Tenant Boundary Enforcement, Auth, Quota Validation)     │
 └──────────────┬───────────────────────────────┬──────────────┘
-│                               │
-Document Upload                 Vector Query & Synthesis
-│                               │
-▼                               ▼
+               │                               │
+        Document Upload                 Vector Query & Synthesis
+               │                               │
+               ▼                               ▼
 ┌─────────────────────────────┐ ┌─────────────────────────────┐
 │     Celery Task Queue       │ │       RAG Engine Core       │
 │      (Redis Broker)         │ │  1. Scoped Vector Filter    │
@@ -43,17 +44,14 @@ Document Upload                 Vector Query & Synthesis
 │  - Semantic Chunking        │ │  3. Gemini 2.5 Synthesis    │
 │  - Gemini Embeddings        │ └──────────────┬──────────────┘
 └──────────────┬──────────────┘                │
-│                               │
-▼                               ▼
+               │                               │
+               ▼                               ▼
 ┌─────────────────────────────────────────────────────────────┐
 │           PostgreSQL + pgvector Extension                   │
-│   - DocumentChunk Table (Cosine distance ranking)           │
+│   - DocumentChunk Table (HNSW/Cosine distance indexing)     │
 │   - Tenant Isolation: Pre-filtered by project_id & org_id   │
 │   - UsageRecord: select_for_update() atomic token metering  │
 └─────────────────────────────────────────────────────────────┘
-
-
----
 
 ## 🚀 Key Architectural & Engineering Highlights
 
