@@ -1,0 +1,4 @@
+Enterprise AI Platform Documentation:
+The multi-tenant architecture uses PostgreSQL 18 with native pgvector extension for similarity search.
+Each organization possesses its own isolated data partitions and access-controlled projects.
+Rate limiting enforces a maximum of 50,000 tokens for free tier subscription plans.
