@@ -1,12 +1,24 @@
-from rest_framework import generics, status, permissions
+from rest_framework import generics, status, permissions, views
 from rest_framework.response import Response
 from rest_framework.exceptions import PermissionDenied, NotFound, ValidationError
 from django.shortcuts import get_object_or_404
 from django.contrib.auth import get_user_model
+from django.db import transaction
 from drf_spectacular.utils import extend_schema, OpenApiResponse
 
-from apps.organizations.models import Organization, Membership, MembershipRole
-from apps.organizations.serializers import OrganizationSerializer, MembershipSerializer
+from apps.organizations.models import (
+    Organization,
+    Membership,
+    MembershipRole,
+    Invitation,
+    InvitationStatus,
+)
+from apps.organizations.serializers import (
+    OrganizationSerializer,
+    MembershipSerializer,
+    InvitationCreateSerializer,
+    InvitationAcceptSerializer,
+)
 from apps.organizations.permissions import (
     IsOrganizationMember,
     IsOrganizationAdmin,
@@ -57,7 +69,7 @@ class OrganizationDetailView(generics.RetrieveUpdateDestroyAPIView):
 
 class OrganizationMemberListCreateView(generics.ListCreateAPIView):
     """
-    List members or add a new member to the organization.
+    List members or add an existing user directly to the organization.
     """
     serializer_class = MembershipSerializer
     permission_classes = [permissions.IsAuthenticated]
@@ -75,7 +87,7 @@ class OrganizationMemberListCreateView(generics.ListCreateAPIView):
 
     def create(self, request, *args, **kwargs):
         org = self.get_organization()
-        # Only Admins and Owners can add members
+        # Only Admins and Owners can add members directly
         if not Membership.objects.filter(
             user=request.user,
             organization=org,
@@ -128,3 +140,93 @@ class OrganizationMemberDetailView(generics.RetrieveUpdateDestroyAPIView):
         if instance.role == MembershipRole.OWNER:
             raise ValidationError("Organization Owner cannot be removed.")
         instance.delete()
+
+
+class OrganizationInviteCreateView(views.APIView):
+    """
+    Create a secure invitation token for inviting team members by email.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    @extend_schema(
+        request=InvitationCreateSerializer,
+        responses={201: OpenApiResponse(description="Invitation created successfully")},
+    )
+    def post(self, request, org_id):
+        membership = get_object_or_404(
+            Membership,
+            organization_id=org_id,
+            user=request.user,
+            role__in=[MembershipRole.OWNER, MembershipRole.ADMIN],
+        )
+
+        serializer = InvitationCreateSerializer(
+            data=request.data,
+            context={"organization": membership.organization},
+        )
+        serializer.is_valid(raise_exception=True)
+
+        invite = serializer.save(
+            organization=membership.organization,
+            invited_by=request.user,
+        )
+
+        return Response(
+            {
+                "message": "Invitation created successfully.",
+                "id": str(invite.id),
+                "email": invite.email,
+                "role": invite.role,
+                "token": invite.token,
+                "expires_at": invite.expires_at,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class OrganizationInviteAcceptView(views.APIView):
+    """
+    Accept an invitation using a secure token and join the organization.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    @extend_schema(
+        request=InvitationAcceptSerializer,
+        responses={200: OpenApiResponse(description="Successfully joined organization")},
+    )
+    def post(self, request):
+        serializer = InvitationAcceptSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        token = serializer.validated_data["token"]
+
+        invite = get_object_or_404(Invitation, token=token, status=InvitationStatus.PENDING)
+
+        if invite.is_expired:
+            invite.status = InvitationStatus.REVOKED
+            invite.save(update_fields=["status"])
+            return Response(
+                {"detail": "This invitation has expired."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        with transaction.atomic():
+            membership, created = Membership.objects.get_or_create(
+                organization=invite.organization,
+                user=request.user,
+                defaults={"role": invite.role},
+            )
+            if not created and membership.role != invite.role:
+                membership.role = invite.role
+                membership.save(update_fields=["role"])
+
+            invite.status = InvitationStatus.ACCEPTED
+            invite.save(update_fields=["status"])
+
+        return Response(
+            {
+                "message": f"Successfully joined {invite.organization.name}.",
+                "organization_id": str(invite.organization.id),
+                "role": invite.role,
+            },
+            status=status.HTTP_200_OK,
+        )

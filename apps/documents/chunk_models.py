@@ -43,7 +43,11 @@ class DocumentChunk(TimeStampedUUIDModel):
     content = models.TextField()
     chunk_index = models.PositiveIntegerField()
     token_count = models.PositiveIntegerField(default=0)
-    embedding = VectorField(dimensions=768)
+    embedding = VectorField(
+        dimensions=768,
+        null=True,
+        blank=True,
+    )
 
     class Meta:
         db_table = "document_chunks"

@@ -1,10 +1,16 @@
+import uuid
 from rest_framework import serializers
 from django.utils.text import slugify
 from django.db import transaction
 from django.contrib.auth import get_user_model
-import uuid
 
-from apps.organizations.models import Organization, Membership, MembershipRole
+from apps.organizations.models import (
+    Organization,
+    Membership,
+    MembershipRole,
+    Invitation,
+    InvitationStatus,
+)
 from apps.accounts.serializers import UserSerializer
 from apps.subscriptions.models import Subscription, SubscriptionPlan, PlanTier
 
@@ -31,13 +37,30 @@ class OrganizationSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Organization
-        fields = ("id", "name", "slug", "is_active", "created_at", "updated_at", "current_user_role")
-        read_only_fields = ("id", "slug", "is_active", "created_at", "updated_at", "current_user_role")
+        fields = (
+            "id",
+            "name",
+            "slug",
+            "is_active",
+            "created_at",
+            "updated_at",
+            "current_user_role",
+        )
+        read_only_fields = (
+            "id",
+            "slug",
+            "is_active",
+            "created_at",
+            "updated_at",
+            "current_user_role",
+        )
 
     def get_current_user_role(self, obj):
         request = self.context.get("request")
         if request and request.user.is_authenticated:
-            membership = Membership.objects.filter(user=request.user, organization=obj).first()
+            membership = Membership.objects.filter(
+                user=request.user, organization=obj
+            ).first()
             return membership.role if membership else None
         return None
 
@@ -76,3 +99,43 @@ class OrganizationSerializer(serializers.ModelSerializer):
             )
 
         return org
+
+
+class InvitationCreateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Invitation
+        fields = ("id", "email", "role", "created_at", "expires_at")
+        read_only_fields = ("id", "created_at", "expires_at")
+
+    def validate_role(self, value):
+        if value not in MembershipRole.values:
+            raise serializers.ValidationError("Invalid role specified.")
+        return value
+
+    def validate_email(self, value):
+        org = self.context["organization"]
+        clean_email = value.lower().strip()
+
+        # Check if already an existing member in this organization
+        if Membership.objects.filter(
+            organization=org, user__email__iexact=clean_email
+        ).exists():
+            raise serializers.ValidationError(
+                "A user with this email is already a member of this organization."
+            )
+
+        # Check if a pending invite already exists for this email
+        if Invitation.objects.filter(
+            organization=org,
+            email__iexact=clean_email,
+            status=InvitationStatus.PENDING,
+        ).exists():
+            raise serializers.ValidationError(
+                "A pending invitation already exists for this email."
+            )
+
+        return clean_email
+
+
+class InvitationAcceptSerializer(serializers.Serializer):
+    token = serializers.CharField(required=True, trim_whitespace=True)
