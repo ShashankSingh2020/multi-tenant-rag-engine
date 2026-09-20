@@ -1,7 +1,10 @@
 import streamlit as st
 import requests
+import os
 
-API_BASE_URL = "http://127.0.0.1:8000/api"
+API_BASE_URL = os.getenv(
+    "API_BASE_URL", "https://multi-tenant-rag-engine.onrender.com"
+)
 
 st.set_page_config(
     page_title="Multi-Tenant AI Knowledge Engine",
