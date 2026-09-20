@@ -144,18 +144,17 @@ Bash
 celery -A config worker --loglevel=info -P solo
 Terminal 3 (Streamlit UI):
 
-Bash
+```bash
 streamlit run frontend_app.py
-🛡️ Enterprise Security & Compliance
-Strict RBAC: Only organization members with appropriate permissions can view or upload documents to a project.
+```
 
-Audit Logging: Every document ingestion, authentication attempt, and AI query creates an immutable audit trail with actor details and timestamps.
+### 🛡️ Enterprise Security & Compliance
+* **Strict RBAC:** Only organization members with appropriate permissions can view or upload documents to a project.
+* **Audit Logging:** Every document ingestion, authentication attempt, and AI query creates an immutable audit trail with actor details and timestamps.
+* **Vector Isolation:** All vectors reside strictly within PostgreSQL tables bounded by organization and project foreign keys.
 
-Vector Isolation: All vectors reside strictly within PostgreSQL tables bounded by organization and project foreign keys.
+## 🚀 Live Demo & Documentation
 
-🚀 Live Demo & Documentation
-Live Application UI: multi-tenant-rag-engine.streamlit.app
-
-Interactive API Docs (Swagger): multi-tenant-rag-engine.onrender.com/api/docs/
-
-Django Admin Portal: multi-tenant-rag-engine.onrender.com/admin/
+* **Live Application UI:** [https://multi-tenant-rag-engine.streamlit.app](https://multi-tenant-rag-engine.streamlit.app)
+* **Interactive API Docs (Swagger):** [https://multi-tenant-rag-engine.onrender.com/api/docs/](https://multi-tenant-rag-engine.onrender.com/api/docs/)
+* **Django Admin Portal:** [https://multi-tenant-rag-engine.onrender.com/admin/](https://multi-tenant-rag-engine.onrender.com/admin/)
