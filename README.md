@@ -152,3 +152,9 @@ Strict RBAC: Only organization members with appropriate permissions can view or 
 Audit Logging: Every document ingestion, authentication attempt, and AI query creates an immutable audit trail with actor details and timestamps.
 
 Vector Isolation: All vectors reside strictly within PostgreSQL tables bounded by organization and project foreign keys.
+
+## 🚀 Live Demo & Documentation
+
+- **Live Application UI**: [https://multi-tenant-rag-engine.streamlit.app](https://multi-tenant-rag-engine.streamlit.app)
+- **Interactive API Docs (Swagger)**: [https://multi-tenant-rag-engine.onrender.com/api/docs/](https://multi-tenant-rag-engine.onrender.com/api/docs/)
+- **Django Admin Portal**: [https://multi-tenant-rag-engine.onrender.com/admin/](https://multi-tenant-rag-engine.onrender.com/admin/)
