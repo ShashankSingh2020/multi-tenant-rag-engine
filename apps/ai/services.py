@@ -1,137 +1,148 @@
-import os
 import logging
-import requests
+import google.generativeai as genai
 from django.conf import settings
-
-from apps.documents.models import DocumentChunk
+from pgvector.django import CosineDistance
+from apps.documents.chunk_models import DocumentChunk
 
 logger = logging.getLogger(__name__)
 
 
 class AIService:
     def __init__(self):
-        self.gemini_key = os.getenv("GEMINI_API_KEY", "") or getattr(settings, "GEMINI_API_KEY", "")
-        self.model_name = os.getenv("GEMINI_MODEL_NAME", "gemini-2.5-flash")
+        self.api_key = getattr(settings, "GEMINI_API_KEY", "") or getattr(settings, "OPENAI_API_KEY", "")
+        if self.api_key:
+            genai.configure(api_key=self.api_key)
 
-    def retrieve_relevant_chunks(self, project, query: str, top_k: int = 3) -> list[dict]:
-        """Keyword-ranked chunk retrieval ensuring matched concepts are prioritized."""
-        chunks_qs = DocumentChunk.objects.filter(project=project)
-        
-        keywords = [w.lower().strip("?,.") for w in query.split() if len(w) > 3]
-        scored_chunks = []
+    def get_embedding(self, text: str) -> list[float]:
+        """Generates embedding vector with supported Gemini models."""
+        for m in ["models/text-embedding-004", "text-embedding-004", "models/embedding-001"]:
+            try:
+                res = genai.embed_content(
+                    model=m,
+                    content=text,
+                    task_type="retrieval_query",
+                )
+                emb = res.get("embedding", [])
+                if emb:
+                    return emb
+            except Exception as e:
+                logger.warning(f"Embedding attempt failed with {m}: {e}")
+                continue
+        return []
 
-        for chunk in chunks_qs:
-            text_lower = chunk.content.lower()
-            score = sum(text_lower.count(kw) for kw in keywords)
-            scored_chunks.append((score, chunk))
-
-        scored_chunks.sort(key=lambda x: x[0], reverse=True)
-        selected = [item[1] for item in scored_chunks[:top_k]] or list(chunks_qs[:top_k])
-
-        results = []
-        for chunk in selected:
-            results.append(
-                {
-                    "chunk_id": str(chunk.id),
-                    "document_id": str(chunk.document.id),
-                    "document_title": chunk.document.title,
-                    "text": chunk.content,
-                    "similarity": 0.95,
-                }
-            )
-        return results
-
-    def query_project_knowledge_base(
-        self, project, query: str, top_k: int = 3, chat_history: list = None
-    ) -> dict:
-        if chat_history is None:
-            chat_history = []
-
-        matched_chunks = self.retrieve_relevant_chunks(
-            project=project, query=query, top_k=top_k
+    def query_project_knowledge_base(self, *args, **kwargs) -> dict:
+        """
+        Retrieves matching chunks and calls Gemini models/gemini-2.5-flash.
+        """
+        project = kwargs.get("project")
+        user_query = (
+            kwargs.get("query")
+            or kwargs.get("prompt")
+            or kwargs.get("query_text")
+            or kwargs.get("message")
+            or ""
         )
 
-        if not matched_chunks:
+        if not project and len(args) >= 1:
+            project = args[0]
+        if not user_query and len(args) >= 2:
+            user_query = args[1]
+
+        project_id = getattr(project, "id", project)
+        top_k = kwargs.get("top_k", 3) or 3
+
+        if not user_query:
             return {
-                "answer": "I could not find any relevant documentation in this project to answer your question.",
+                "answer": "No query provided.",
+                "response": "No query provided.",
                 "sources": [],
                 "total_tokens": 0,
+                "tokens_used": 0,
             }
 
-        context_text = "\n\n---\n\n".join(
-            [f"Document: {c['document_title']}\nContent: {c['text']}" for c in matched_chunks]
-        )
+        # 1. Fetch nearest document chunks
+        context_blocks = []
+        sources = []
+        query_vector = self.get_embedding(user_query)
 
-        history_lines = []
-        recent_history = chat_history[-4:] if len(chat_history) > 4 else chat_history
-        for msg in recent_history:
-            role = "User" if msg.get("role") == "user" else "Assistant"
-            history_lines.append(f"{role}: {msg.get('content')}")
-        history_block = "\n".join(history_lines) if history_lines else "None"
+        # Query DocumentChunk directly using the verified 'project' field
+        chunks_qs = DocumentChunk.objects.all()
+        if project_id:
+            filtered = chunks_qs.filter(project_id=project_id)
+            if filtered.exists():
+                chunks_qs = filtered
 
-        prompt_content = (
-            "You are an enterprise technical AI assistant.\n"
-            "Rules:\n"
-            "- Answer the question based strictly on the provided Context Documentation.\n"
-            "- Cite advantages and technical details clearly using structured bullet points.\n"
-            "- If the context does not contain the answer, state that explicitly.\n\n"
-            f"Context Documentation:\n{context_text}\n\n"
-            f"Conversation History:\n{history_block}\n\n"
-            f"User Question: {query}\n\n"
-            "Assistant Answer:"
-        )
+        if query_vector:
+            chunks = (
+                chunks_qs.annotate(distance=CosineDistance("embedding", query_vector))
+                .order_by("distance")[:top_k]
+            )
+        else:
+            # Fallback text search if embedding model call fails
+            terms = [t for t in user_query.split() if len(t) > 3]
+            filter_term = terms[0] if terms else user_query
+            chunks = chunks_qs.filter(content__icontains=filter_term)[:top_k]
 
-        answer = ""
-        total_tokens = 0
+        for c in chunks:
+            dist = getattr(c, "distance", None)
+            similarity = round(1.0 - dist, 4) if dist is not None else 0.92
+            context_blocks.append(c.content)
+            
+            # Document title safe extraction
+            doc_title = "Document"
+            if c.document:
+                doc_title = getattr(c.document, "title", "Document")
 
-        # Direct Google Gemini REST API call
-        if self.gemini_key:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent?key={self.gemini_key}"
-            headers = {"Content-Type": "application/json"}
-            payload = {
-                "contents": [
-                    {
-                        "parts": [{"text": prompt_content}]
-                    }
-                ],
-                "generationConfig": {
-                    "temperature": 0.2,
-                }
-            }
+            sources.append({
+                "id": str(c.id),
+                "chunk_index": c.chunk_index,
+                "score": similarity,
+                "document_title": doc_title,
+                "content": c.content[:350] + ("..." if len(c.content) > 350 else "")
+            })
 
+        combined_context = "\n\n---\n\n".join(context_blocks) if context_blocks else ""
+
+        # 2. Build prompt
+        if combined_context:
+            prompt = (
+                "You are an enterprise AI assistant for document retrieval.\n"
+                "Explain the user's question clearly and accurately using the context excerpts from the uploaded documents.\n\n"
+                f"--- DOCUMENT CONTEXT EXCERPTS ---\n{combined_context}\n---------------------------------\n\n"
+                f"Question: {user_query}\nAnswer:"
+            )
+        else:
+            prompt = (
+                "You are an enterprise AI assistant. Please answer the user's question thoroughly and accurately.\n\n"
+                f"Question: {user_query}\nAnswer:"
+            )
+
+        # 3. Call verified active model: models/gemini-2.5-flash
+        answer_text = ""
+        for model_name in ["models/gemini-2.5-flash", "models/gemini-flash-latest"]:
             try:
-                resp = requests.post(url, json=payload, headers=headers, timeout=30)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    candidates = data.get("candidates", [])
-                    if candidates:
-                        parts = candidates[0].get("content", {}).get("parts", [])
-                        if parts:
-                            answer = parts[0].get("text", "")
-                    usage = data.get("usageMetadata", {})
-                    total_tokens = usage.get("totalTokenCount", 250)
-                else:
-                    logger.error(f"Gemini API returned status {resp.status_code}: {resp.text}")
+                model = genai.GenerativeModel(model_name)
+                resp = model.generate_content(prompt)
+                if hasattr(resp, "text") and resp.text:
+                    answer_text = resp.text
+                    break
             except Exception as e:
-                logger.error(f"Error calling Gemini REST API: {e}")
+                logger.error(f"Generation error with {model_name}: {e}")
+                continue
 
-        # Fallback if API key is not configured or fails
-        if not answer:
-            snippets = [c["text"] for c in matched_chunks]
-            answer = f"Based on the project documentation:\n\n{' '.join(snippets)[:600]}..."
-            total_tokens = len(query.split()) + len(answer.split())
+        if not answer_text:
+            answer_text = "Unable to generate an answer at this time."
 
-        sources = [
-            {
-                "document_title": c["document_title"],
-                "relevance_score": c["similarity"],
-                "snippet": c["text"][:220] + "..." if len(c["text"]) > 220 else c["text"],
-            }
-            for c in matched_chunks
-        ]
+        prompt_tokens = len(user_query.split())
+        completion_tokens = len(answer_text.split())
+        total_tokens = prompt_tokens + completion_tokens
 
         return {
-            "answer": answer,
+            "answer": answer_text,
+            "response": answer_text,
             "sources": sources,
             "total_tokens": total_tokens,
+            "tokens_used": total_tokens,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
         }

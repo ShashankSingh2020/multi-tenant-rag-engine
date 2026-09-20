@@ -35,14 +35,12 @@ def auth_headers():
 # Authentication Screen
 # -----------------------------------------------------------------------------
 if not st.session_state.access_token:
-    st.title("🔐 Enterprise AI Knowledge Engine")
-    st.caption("Sign in to access your tenant workspace, upload documents, and query RAG knowledge.")
-
-    tab_login, tab_register = st.tabs(["Log In", "Create Account"])
+    st.title("🔐 Multi-Tenant Enterprise AI Portal")
+    tab_login, tab_register = st.tabs(["Log In", "Register New Tenant"])
 
     with tab_login:
         with st.form("login_form"):
-            email = st.text_input("Email", value="admin@saas.com")
+            email = st.text_input("Email")
             password = st.text_input("Password", type="password")
             submitted = st.form_submit_button("Sign In")
 
@@ -85,12 +83,14 @@ if not st.session_state.access_token:
 
     st.stop()
 
+
 # -----------------------------------------------------------------------------
 # Sidebar: Tenant Switcher, Project Switcher, & Plan Specs
 # -----------------------------------------------------------------------------
 with st.sidebar:
     st.title("🏢 Workspace Controls")
-    st.write(f"User: **{st.session_state.current_user.get('email', '')}**")
+    user_display = (st.session_state.current_user or {}).get("email", "")
+    st.write(f"User: **{user_display}**")
 
     if st.button("🚪 Sign Out", use_container_width=True):
         st.session_state.access_token = None
@@ -168,6 +168,7 @@ with st.sidebar:
                 else:
                     st.error(create_p.text)
 
+
 # -----------------------------------------------------------------------------
 # Top-Level Persistent Token Counter & Cost-Saver Advice
 # -----------------------------------------------------------------------------
@@ -196,7 +197,7 @@ if st.session_state.selected_org_id:
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("🪙 Tokens Remaining", f"{tokens_left:,}", f"{tokens_used:,} used", delta_color="inverse")
         m2.metric("⚡ Queries Left", f"{reqs_left}", f"{reqs_used} / {req_limit}")
-        m3.metric("📁 Documents Indexed", f"{docs_used} / {doc_limit}")
+        m3.metric("📄 Documents Indexed", f"{docs_used} / {doc_limit}")
         m4.metric("🛡️ Active Plan", f"{usage.get('plan')}")
 
         # Proactive Token Saver & Cost Optimization Guide
@@ -214,12 +215,13 @@ if not st.session_state.selected_project_id:
     st.info("👈 Please select or create a Project in the sidebar to begin.")
     st.stop()
 
+
 # -----------------------------------------------------------------------------
 # Main Operational Workspace: Chat, Documents, Audit & Team
 # -----------------------------------------------------------------------------
 tab_chat, tab_docs, tab_team, tab_audit = st.tabs([
     "💬 Multi-Turn RAG Chat",
-    "📁 Document Management",
+    "📄 Document Management",
     "👥 Team & Members",
     "📋 Compliance Audit Logs",
 ])
@@ -241,8 +243,10 @@ with tab_chat:
             if message.get("sources"):
                 with st.expander("🔍 Referenced Source Chunks"):
                     for src in message["sources"]:
-                        st.markdown(f"- **{src.get('document_title')}** (Similarity Score: `{src.get('relevance_score', 0):.2f}`)")
-                        st.caption(f"> {src.get('snippet')}")
+                        sim_score = src.get("score") if src.get("score") is not None else src.get("relevance_score", 0)
+                        preview = src.get("content") or src.get("snippet", "")
+                        st.markdown(f"- **{src.get('document_title', 'Document')}** (Similarity Score: `{sim_score:.2f}`)")
+                        st.caption(f"> {preview}")
 
     user_query = st.chat_input("Ask a question about your project documents...")
     if user_query:
@@ -253,47 +257,38 @@ with tab_chat:
         ]
 
         st.session_state.chat_history.append({"role": "user", "content": user_query})
-        with st.chat_message("user"):
-            st.markdown(user_query)
 
-        with st.chat_message("assistant"):
-            with st.spinner("Searching vectors and synthesizing answer..."):
-                try:
-                    rag_resp = requests.post(
-                        f"{API_BASE_URL}/ai/query/",
-                        json={
-                            "project_id": st.session_state.selected_project_id,
-                            "query": user_query,
-                            "top_k": top_k,
-                            "chat_history": history_payload,
-                        },
-                        headers=auth_headers(),
-                    )
+        with st.spinner("Searching vectors and synthesizing answer..."):
+            try:
+                rag_resp = requests.post(
+                    f"{API_BASE_URL}/ai/query/",
+                    json={
+                        "project_id": st.session_state.selected_project_id,
+                        "query": user_query,
+                        "top_k": top_k,
+                        "chat_history": history_payload,
+                    },
+                    headers=auth_headers(),
+                )
 
-                    if rag_resp.status_code == 200:
-                        ans_data = rag_resp.json()
-                        answer_text = ans_data.get("answer", "")
-                        sources = ans_data.get("sources", [])
+                if rag_resp.status_code == 200:
+                    ans_data = rag_resp.json()
+                    answer_text = ans_data.get("answer", "")
+                    sources = ans_data.get("sources", [])
 
-                        st.markdown(answer_text)
-
-                        if sources:
-                            with st.expander("🔍 Referenced Source Chunks"):
-                                for s in sources:
-                                    st.markdown(f"- **{s.get('document_title')}** (Similarity Score: `{s.get('relevance_score', 0):.2f}`)")
-                                    st.caption(f"> {s.get('snippet')}")
-
-                        st.session_state.chat_history.append({
-                            "role": "assistant",
-                            "content": answer_text,
-                            "sources": sources,
-                        })
-                    elif rag_resp.status_code == 429:
-                        st.error("Quota exceeded! You have exhausted your monthly AI queries or tokens.")
-                    else:
-                        st.error(f"Error executing AI query ({rag_resp.status_code}): {rag_resp.text}")
-                except Exception as e:
-                    st.error(f"Request failed: {str(e)}")
+                    st.session_state.chat_history.append({
+                        "role": "assistant",
+                        "content": answer_text,
+                        "sources": sources,
+                    })
+                    # Immediately rerun to refresh top-level usage metrics and render response
+                    st.rerun()
+                elif rag_resp.status_code == 429:
+                    st.error("Quota exceeded! You have exhausted your monthly AI queries or tokens.")
+                else:
+                    st.error(f"Error executing AI query ({rag_resp.status_code}): {rag_resp.text}")
+            except Exception as e:
+                st.error(f"Request failed: {str(e)}")
 
 # =============================================================================
 # TAB 2: Document Management & Ingestion

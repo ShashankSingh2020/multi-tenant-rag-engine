@@ -162,6 +162,12 @@ MEDIA_ROOT = BASE_DIR / "media"
 OPENAI_API_KEY = env.str("OPENAI_API_KEY", default="")
 OPENAI_EMBEDDING_MODEL = env.str("OPENAI_EMBEDDING_MODEL", default="text-embedding-3-small")
 OPENAI_CHAT_MODEL = env.str("OPENAI_CHAT_MODEL", default="gpt-4o-mini")
+# Gemini AI Settings
+GEMINI_API_KEY = env.str("GEMINI_API_KEY", default="")
+GEMINI_MODEL_NAME = env.str("GEMINI_MODEL_NAME", default="gemini-1.5-flash")
+EMBEDDING_MODEL_NAME = env.str("EMBEDDING_MODEL_NAME", default="models/text-embedding-004")
 
 CELERY_TASK_ALWAYS_EAGER = True
 CELERY_TASK_EAGER_PROPAGATES = True
+CELERY_BROKER_URL = "memory://"
+CELERY_RESULT_BACKEND = "cache+memory://"

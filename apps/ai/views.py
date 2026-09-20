@@ -57,6 +57,51 @@ def safe_audit_log(actor_user, organization, action_name, metadata):
         logger.warning(f"Audit log bypassed: {e}")
 
 
+def safe_record_usage(organization, tokens_used):
+    """Safely invokes UsageService to record token consumption and query count."""
+    # 1. Try classmethod `record_ai_request_usage`
+    if hasattr(UsageService, "record_ai_request_usage"):
+        try:
+            UsageService.record_ai_request_usage(organization=organization, tokens_used=tokens_used)
+            return
+        except TypeError:
+            try:
+                UsageService.record_ai_request_usage(organization, tokens_used)
+                return
+            except Exception as e:
+                logger.warning(f"Usage recording failed on classmethod record_ai_request_usage: {e}")
+
+    # 2. Try classmethod `record_ai_request`
+    if hasattr(UsageService, "record_ai_request"):
+        try:
+            UsageService.record_ai_request(organization=organization, tokens_used=tokens_used)
+            return
+        except TypeError:
+            try:
+                UsageService.record_ai_request(organization, tokens_used)
+                return
+            except Exception as e:
+                logger.warning(f"Usage recording failed on classmethod record_ai_request: {e}")
+
+    # 3. Try instance methods
+    try:
+        inst = UsageService()
+        for method_name in ["record_ai_request_usage", "record_ai_request"]:
+            if hasattr(inst, method_name):
+                func = getattr(inst, method_name)
+                try:
+                    func(organization=organization, tokens_used=tokens_used)
+                    return
+                except TypeError:
+                    try:
+                        func(organization, tokens_used)
+                        return
+                    except Exception:
+                        continue
+    except Exception as e:
+        logger.warning(f"Usage recording failed on instance methods: {e}")
+
+
 class RAGQueryView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -112,16 +157,9 @@ class RAGQueryView(APIView):
             chat_history=chat_history,
         )
 
-        # 4. Record Token Consumption
+        # 4. Record Token Consumption & Decrement Quota
         tokens_consumed = result.get("total_tokens", 0)
-        if hasattr(usage_service, "record_ai_request"):
-            try:
-                usage_service.record_ai_request(org, tokens_used=tokens_consumed)
-            except TypeError:
-                try:
-                    usage_service.record_ai_request(organization=org, tokens_used=tokens_consumed)
-                except TypeError:
-                    usage_service.record_ai_request(tokens_used=tokens_consumed)
+        safe_record_usage(organization=org, tokens_used=tokens_consumed)
 
         # 5. Clean Audit Log Registration
         safe_audit_log(
