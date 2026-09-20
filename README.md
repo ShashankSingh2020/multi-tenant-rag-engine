@@ -7,36 +7,35 @@
 [![Celery](https://img.shields.io/badge/Celery-Distributed_Task_Queue-37814A?style=for-the-badge&logo=celery&logoColor=white)](https://docs.celeryq.dev/)
 [![Streamlit](https://img.shields.io/badge/Streamlit-UI_Dashboard-FF4B4B?style=for-the-badge&logo=streamlit&logoColor=white)](https://streamlit.io/)
 
-A multi-tenant, production-grade Retrieval-Augmented Generation (RAG) platform. Built to deliver sub-second semantic search across private enterprise documents with strict workspace data isolation, asynchronous ingestion pipelines, concurrency-safe token usage metering, and immutable compliance audit trails.
+A multi-tenant, production-grade Retrieval-Augmented Generation (RAG) SaaS platform. Delivers sub-second semantic search across private enterprise documents with workspace data isolation, asynchronous ingestion queues, concurrency-safe token usage metering, and immutable audit trails.
 
 ---
 
 ## 📌 Executive Summary
 
-Modern enterprises need domain-specific AI search over proprietary documents without risking internal data leakage or uncontrolled API costs. This project implements an enterprise-grade RAG software-as-a-service (SaaS) architecture that guarantees:
-- **Zero Cross-Tenant Leakage:** Workspaces, projects, and vector embeddings are strictly partitioned.
-- **Asynchronous Processing:** Heavy PDF parsing and vector generation run decoupled from API requests via worker queues.
+Modern enterprises need domain-specific AI search over proprietary documents without risking internal data leakage or uncontrolled API expenses. This platform implements a SaaS architecture with three core guarantees:
+- **Zero Cross-Tenant Leakage:** Organizations, projects, and vector embeddings are partitioned at the database query level.
+- **Asynchronous Ingestion:** Heavy PDF parsing and vector generation run decoupled from API requests via Celery workers.
 - **Transactional Quota Protection:** Atomic token and request decrementing prevents race conditions and over-billing.
 
 ---
 
 ## 🏗️ System Architecture
 
-```text
 ┌─────────────────────────────────────────────────────────────┐
 │                    Streamlit Web Client                     │
 │    (Workspace Switcher, Multi-Turn Chat, Real-Time Quotas)  │
 └──────────────────────────────┬──────────────────────────────┘
-                               │ HTTP / JWT Bearer
-                               ▼
+│ HTTP / JWT Bearer
+▼
 ┌─────────────────────────────────────────────────────────────┐
 │                    Django REST Framework                    │
 │   (Tenant Boundary Enforcement, Auth, Quota Validation)     │
 └──────────────┬───────────────────────────────┬──────────────┘
-               │                               │
-        Document Upload                 Vector Query & Synthesis
-               │                               │
-               ▼                               ▼
+│                               │
+Document Upload                 Vector Query & Synthesis
+│                               │
+▼                               ▼
 ┌─────────────────────────────┐ ┌─────────────────────────────┐
 │     Celery Task Queue       │ │       RAG Engine Core       │
 │      (Redis Broker)         │ │  1. Scoped Vector Filter    │
@@ -44,15 +43,56 @@ Modern enterprises need domain-specific AI search over proprietary documents wit
 │  - Semantic Chunking        │ │  3. Gemini 2.5 Synthesis    │
 │  - Gemini Embeddings        │ └──────────────┬──────────────┘
 └──────────────┬──────────────┘                │
-               │                               │
-               ▼                               ▼
+│                               │
+▼                               ▼
 ┌─────────────────────────────────────────────────────────────┐
 │           PostgreSQL + pgvector Extension                   │
-│   - DocumentChunk Table (HNSW/Cosine distance indexing)     │
+│   - DocumentChunk Table (Cosine distance ranking)           │
 │   - Tenant Isolation: Pre-filtered by project_id & org_id   │
 │   - UsageRecord: select_for_update() atomic token metering  │
 └─────────────────────────────────────────────────────────────┘
-🚀 Key Architectural & Engineering Highlights1. Strict Tenant Boundary IsolationMulti-tenancy is enforced directly at the database query level across Organization ➔ Project ➔ Document ➔ DocumentChunk.Vector searches perform scoped pre-filtering by project_id and organization membership before running cosine similarity distance rankings, completely preventing cross-tenant vector leakage.2. High-Throughput Asynchronous IngestionDocument ingestion is decoupled from the HTTP request-response cycle using Celery workers and a Redis broker.Upload requests store metadata and return an immediate 201 Created with a PENDING status.Text extraction, chunking (300-word sliding window with 30-word overlap), and Gemini embedding generation happen in the background, updating status to READY upon transaction commit.3. Concurrency-Safe Quota & Metering EngineEnterprise token consumption and query quotas track per organization per monthly billing cycle.Uses PostgreSQL row-level locks (select_for_update()) and database-level F() expressions to prevent race conditions during concurrent user requests.Automatically halts requests with HTTP 429 Too Many Requests when limits are reached.4. Vector Search & LLM OrchestrationVector storage powered by PostgreSQL pgvector storing normalized 768-dimensional embeddings.LLM inference orchestrated with Google's Gemini 2.5 Flash with sliding conversational context and cited source chunk transparency.🛠️ Tech Stack BreakdownDomainTechnologyRole in ArchitectureBackend APIDjango 5.0+, DRFCore business logic, RBAC, JWT authentication, and REST endpointsVector DatabasePostgreSQL 16 + pgvectorRelational data integrity alongside vector similarity searchAI & EmbeddingsGoogle Gemini (gemini-2.5-flash, text-embedding-004)High-speed response generation and vector representationTask QueueCelery 5.3+ & RedisBackground asynchronous document chunking and vector processingFrontend UIStreamlitReactive multi-tab dashboard with real-time quota telemetryAPI DocumentationOpenAPI 3.0 via drf-spectacularSchema generation and interactive API docs📂 Repository LayoutPlaintext├── apps/
+
+
+---
+
+## 🚀 Key Architectural & Engineering Highlights
+
+### 1. Strict Tenant Boundary Isolation
+- Multi-tenancy is enforced directly at the database query level across `Organization` ➔ `Project` ➔ `Document` ➔ `DocumentChunk`.
+- Vector searches perform scoped pre-filtering by `project_id` and organization membership **before** running cosine similarity distance rankings, completely preventing cross-tenant vector leakage.
+
+### 2. High-Throughput Asynchronous Ingestion
+- Document ingestion is decoupled from the HTTP request-response cycle using **Celery workers** and a **Redis broker**.
+- Upload requests store metadata and return an immediate `201 Created` with a `PENDING` status.
+- Text extraction, chunking (300-word sliding window with 30-word overlap), and Gemini embedding generation happen in background workers, updating status to `READY` upon transaction commit.
+
+### 3. Concurrency-Safe Quota & Metering Engine
+- Enterprise token consumption and query quotas track per organization per monthly billing cycle.
+- Uses PostgreSQL row-level locks (`select_for_update()`) and database-level `F()` expressions to prevent race conditions during concurrent user requests.
+- Automatically halts requests with `HTTP 429 Too Many Requests` when limits are reached.
+
+### 4. Vector Search & LLM Orchestration
+- Vector storage powered by **PostgreSQL `pgvector`** storing normalized 768-dimensional embeddings.
+- LLM inference orchestrated with Google's **Gemini 2.5 Flash** with sliding conversational context and cited source chunk transparency.
+
+---
+
+## 🛠️ Tech Stack Breakdown
+
+| Domain | Technology | Role in Architecture |
+| :--- | :--- | :--- |
+| **Backend API** | Django 5.0+, DRF | Core business logic, RBAC, JWT authentication, and REST endpoints |
+| **Vector Database** | PostgreSQL 16 + `pgvector` | Relational data integrity alongside vector similarity search |
+| **AI & Embeddings** | Google Gemini (`gemini-2.5-flash`, `text-embedding-004`) | High-speed response generation and vector representation |
+| **Task Queue** | Celery 5.3+ & Redis | Background asynchronous document chunking and vector processing |
+| **Frontend UI** | Streamlit | Reactive multi-tab dashboard with real-time quota telemetry |
+| **API Documentation** | OpenAPI 3.0 via `drf-spectacular` | Schema generation and interactive API docs |
+
+---
+
+## 📂 Repository Layout
+
+├── apps/
 │   ├── ai/               # Vector similarity search and Gemini LLM synthesis
 │   ├── audit/            # Immutable compliance logging for operations and auth
 │   ├── documents/        # PDF/Text parsing, chunk models, and Celery tasks
@@ -63,20 +103,54 @@ Modern enterprises need domain-specific AI search over proprietary documents wit
 ├── frontend_app.py       # Streamlit interactive enterprise dashboard
 ├── docker-compose.yml    # Containerized PostgreSQL (pgvector) and Redis
 └── requirements.txt      # Pinned dependency requirements
-⚡ Local Setup Guide1. PrerequisitesPython 3.11+PostgreSQL 16+ with pgvector extensionRedis server running on port 6379Google Gemini API Key2. Clone & Virtual EnvironmentBashgit clone [https://github.com/ShashankSingh2020/multi-tenant-rag-engine.git](https://github.com/ShashankSingh2020/multi-tenant-rag-engine.git)
+
+
+---
+
+## ⚡ Local Setup Guide
+
+### 1. Prerequisites
+- Python 3.11+
+- PostgreSQL 16+ with `pgvector` extension
+- Redis server running on port `6379`
+- Google Gemini API Key
+
+### 2. Clone & Virtual Environment
+```bash
+git clone https://github.com/ShashankSingh2020/multi-tenant-rag-engine.git
 cd multi-tenant-rag-engine
 
 python -m venv venv
 venv\Scripts\activate
 pip install -r requirements.txt
-3. Configure Environment VariablesCreate a .env file in the root directory:Code snippetDEBUG=True
+3. Configure Environment Variables
+Create a .env file in the root directory:
+
+Code snippet
+DEBUG=True
 SECRET_KEY=your-django-secret-key
 DATABASE_URL=postgres://postgres:password@localhost:5432/multi_tenant_saas
 GEMINI_API_KEY=your-gemini-api-key
 REDIS_URL=redis://127.0.0.1:6379/0
-4. Apply Database MigrationsBashpython manage.py migrate
-5. Launch Development ServicesTerminal 1 (Django Server):Bashpython manage.py runserver 8000
-Terminal 2 (Celery Background Worker):Bash# Windows
+4. Apply Database Migrations
+Bash
+python manage.py migrate
+5. Launch Development Services
+Terminal 1 (Django Server):
+
+Bash
+python manage.py runserver 8000
+Terminal 2 (Celery Background Worker):
+
+Bash
 celery -A config worker --loglevel=info -P solo
-Terminal 3 (Streamlit UI):Bashstreamlit run frontend_app.py
-🛡️ Enterprise Security & ComplianceStrict RBAC: Only organization members with appropriate permissions can view or upload documents to a project.Audit Logging: Every document ingestion, authentication attempt, and AI query creates an immutable audit trail with actor details and timestamps.Vector Isolation: All vectors reside strictly within PostgreSQL tables bounded by organization and project foreign keys.
+Terminal 3 (Streamlit UI):
+
+Bash
+streamlit run frontend_app.py
+🛡️ Enterprise Security & Compliance
+Strict RBAC: Only organization members with appropriate permissions can view or upload documents to a project.
+
+Audit Logging: Every document ingestion, authentication attempt, and AI query creates an immutable audit trail with actor details and timestamps.
+
+Vector Isolation: All vectors reside strictly within PostgreSQL tables bounded by organization and project foreign keys.
