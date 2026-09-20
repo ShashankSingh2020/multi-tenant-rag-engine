@@ -7,6 +7,7 @@ from apps.ai.services import AIService
 from apps.usage.services import UsageService
 from apps.audit.services import AuditService
 from apps.projects.models import Project
+from apps.common.throttling import TenantAIRateThrottle
 
 logger = logging.getLogger(__name__)
 
@@ -16,13 +17,11 @@ def safe_audit_log(actor_user, organization, action_name, metadata):
     target_func = None
     inst = None
 
-    # Check classmethods/staticmethods first
     for name in ["log_event", "log_action", "create_log", "log"]:
         if hasattr(AuditService, name):
             target_func = getattr(AuditService, name)
             break
 
-    # If not on class, check instance methods
     if not target_func:
         try:
             inst = AuditService()
@@ -36,7 +35,6 @@ def safe_audit_log(actor_user, organization, action_name, metadata):
     if not target_func:
         return
 
-    # Inspect the parameters required by the target audit method
     try:
         sig = inspect.signature(target_func)
         param_names = list(sig.parameters.keys())
@@ -59,51 +57,15 @@ def safe_audit_log(actor_user, organization, action_name, metadata):
 
 def safe_record_usage(organization, tokens_used):
     """Safely invokes UsageService to record token consumption and query count."""
-    # 1. Try classmethod `record_ai_request_usage`
-    if hasattr(UsageService, "record_ai_request_usage"):
-        try:
-            UsageService.record_ai_request_usage(organization=organization, tokens_used=tokens_used)
-            return
-        except TypeError:
-            try:
-                UsageService.record_ai_request_usage(organization, tokens_used)
-                return
-            except Exception as e:
-                logger.warning(f"Usage recording failed on classmethod record_ai_request_usage: {e}")
-
-    # 2. Try classmethod `record_ai_request`
-    if hasattr(UsageService, "record_ai_request"):
-        try:
-            UsageService.record_ai_request(organization=organization, tokens_used=tokens_used)
-            return
-        except TypeError:
-            try:
-                UsageService.record_ai_request(organization, tokens_used)
-                return
-            except Exception as e:
-                logger.warning(f"Usage recording failed on classmethod record_ai_request: {e}")
-
-    # 3. Try instance methods
     try:
-        inst = UsageService()
-        for method_name in ["record_ai_request_usage", "record_ai_request"]:
-            if hasattr(inst, method_name):
-                func = getattr(inst, method_name)
-                try:
-                    func(organization=organization, tokens_used=tokens_used)
-                    return
-                except TypeError:
-                    try:
-                        func(organization, tokens_used)
-                        return
-                    except Exception:
-                        continue
+        UsageService.record_ai_request_usage(organization=organization, tokens_used=tokens_used)
     except Exception as e:
-        logger.warning(f"Usage recording failed on instance methods: {e}")
+        logger.warning(f"Usage recording failed: {e}")
 
 
 class RAGQueryView(APIView):
     permission_classes = [permissions.IsAuthenticated]
+    throttle_classes = [TenantAIRateThrottle]
 
     def post(self, request, *args, **kwargs):
         project_id = request.data.get("project_id")
@@ -131,22 +93,12 @@ class RAGQueryView(APIView):
 
         org = project.organization
 
-        # 2. Check Quota Usage
-        usage_service = UsageService()
-        if hasattr(usage_service, "can_execute_ai_request"):
-            try:
-                allowed = usage_service.can_execute_ai_request(org)
-            except TypeError:
-                try:
-                    allowed = usage_service.can_execute_ai_request(organization=org)
-                except TypeError:
-                    allowed = usage_service.can_execute_ai_request()
-
-            if not allowed:
-                return Response(
-                    {"error": "AI request quota exceeded for the current billing period."},
-                    status=status.HTTP_429_TOO_MANY_REQUESTS,
-                )
+        # 2. Check Quota Usage (Pre-flight Gate)
+        if not UsageService.can_execute_ai_request(org):
+            return Response(
+                {"error": "AI request quota exceeded for the current billing period."},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
 
         # 3. Vector Retrieval & Synthesis via Gemini
         ai_service = AIService()

@@ -1,87 +1,114 @@
-from datetime import datetime
+import logging
 from django.utils import timezone
-from django.db import transaction
-from django.db.models import F
-from apps.organizations.models import Organization
 from apps.usage.models import UsageRecord
 from apps.subscriptions.models import Subscription
 
-
-class QuotaExceededException(Exception):
-    pass
+logger = logging.getLogger(__name__)
 
 
 class UsageService:
-    @staticmethod
-    def get_or_create_monthly_record(organization: Organization) -> UsageRecord:
+
+    @classmethod
+    def get_organization_usage_summary(cls, organization):
+        """
+        Retrieves current billing cycle usage metrics and plan limits for an organization.
+        Used across views (documents, AI queries) for quota validation and tracking.
+        """
+        if not organization:
+            return {
+                "ai_requests": 0,
+                "ai_request_limit": 100,
+                "remaining_ai_requests": 100,
+                "documents": 0,
+                "document_limit": 10,
+                "remaining_documents": 10,
+                "tokens_used": 0,
+                "plan": "FREE",
+            }
+
+        subscription = getattr(organization, "subscription", None)
+        if not subscription:
+            subscription = Subscription.objects.filter(organization=organization, is_active=True).first()
+
+        # Plan defaults
+        max_ai_requests = 100
+        max_documents = 10
+        plan_name = "FREE"
+
+        if subscription and hasattr(subscription, "plan") and subscription.plan:
+            plan = subscription.plan
+            plan_name = getattr(plan, "name", "FREE")
+            max_ai_requests = getattr(plan, "max_ai_requests_per_month", 100)
+            max_documents = getattr(plan, "max_documents", 10)
+
         now = timezone.now()
-        record, _ = UsageRecord.objects.get_or_create(
+        usage_record = UsageRecord.objects.filter(
+            organization=organization,
+            year=now.year,
+            month=now.month,
+        ).first()
+
+        ai_requests_used = usage_record.ai_requests_count if usage_record else 0
+        documents_used = usage_record.documents_uploaded_count if usage_record else 0
+        tokens_used = usage_record.total_tokens_used if usage_record else 0
+
+        return {
+            "plan": plan_name,
+            "ai_requests": ai_requests_used,
+            "ai_request_limit": max_ai_requests,
+            "remaining_ai_requests": max(0, max_ai_requests - ai_requests_used),
+            "documents": documents_used,
+            "document_limit": max_documents,
+            "remaining_documents": max(0, max_documents - documents_used),
+            "tokens_used": tokens_used,
+        }
+
+    @classmethod
+    def can_execute_ai_request(cls, organization=None) -> bool:
+        """
+        Pre-flight check: Verifies if the organization has remaining AI requests
+        under their current subscription tier before invoking LLM inference.
+        """
+        if not organization:
+            return True
+
+        summary = cls.get_organization_usage_summary(organization)
+        return summary["ai_requests"] < summary["ai_request_limit"]
+
+    @classmethod
+    def record_ai_request_usage(cls, organization, tokens_used: int = 0):
+        """Atomically records an AI request and updates token metrics."""
+        if not organization:
+            return
+
+        now = timezone.now()
+        usage_record, _ = UsageRecord.objects.get_or_create(
             organization=organization,
             year=now.year,
             month=now.month,
         )
-        return record
+
+        usage_record.ai_requests_count += 1
+        usage_record.total_tokens_used += int(tokens_used or 0)
+        usage_record.save()
 
     @classmethod
-    def get_organization_usage_summary(cls, organization: Organization) -> dict:
+    def record_ai_request(cls, organization, tokens_used: int = 0):
+        """Alias method for backward compatibility."""
+        return cls.record_ai_request_usage(organization=organization, tokens_used=tokens_used)
+
+    @classmethod
+    def record_document_upload(cls, organization):
+        """Tracks total document uploads against organization limits."""
+        if not organization:
+            return
+
         now = timezone.now()
-        record = cls.get_or_create_monthly_record(organization)
-        subscription = getattr(organization, "subscription", None)
+        usage_record, _ = UsageRecord.objects.get_or_create(
+            organization=organization,
+            year=now.year,
+            month=now.month,
+        )
 
-        if not subscription or not subscription.plan:
-            max_ai = 0
-            max_docs = 0
-            max_tokens = 0
-            plan_name = "NONE"
-        else:
-            plan = subscription.plan
-            max_ai = plan.max_ai_requests_per_month
-            max_docs = plan.max_documents
-            max_tokens = plan.max_tokens_per_month
-            plan_name = plan.name
-
-        return {
-            "plan": plan_name,
-            "billing_period": f"{now.year}-{now.month:02d}",
-            "ai_requests": record.ai_requests_count,
-            "ai_request_limit": max_ai,
-            "remaining_ai_requests": max(0, max_ai - record.ai_requests_count),
-            "total_tokens_used": record.total_tokens_used,
-            "token_limit": max_tokens,
-            "remaining_tokens": max(0, max_tokens - record.total_tokens_used),
-            "documents_uploaded": record.documents_uploaded_count,
-            "document_limit": max_docs,
-            "remaining_documents": max(0, max_docs - record.documents_uploaded_count),
-        }
-
-    @classmethod
-    def verify_ai_quota(cls, organization: Organization) -> bool:
-        summary = cls.get_organization_usage_summary(organization)
-        if summary["remaining_ai_requests"] <= 0:
-            raise QuotaExceededException("Monthly AI request quota exceeded for this organization.")
-        return True
-
-    @classmethod
-    def record_ai_request_usage(cls, organization: Organization, tokens_used: int = 0):
-        now = timezone.now()
-        with transaction.atomic():
-            record, _ = UsageRecord.objects.select_for_update().get_or_create(
-                organization=organization,
-                year=now.year,
-                month=now.month,
-            )
-            record.ai_requests_count = F("ai_requests_count") + 1
-            record.total_tokens_used = F("total_tokens_used") + tokens_used
-            record.save(update_fields=["ai_requests_count", "total_tokens_used", "updated_at"])
-
-    @classmethod
-    def record_document_upload(cls, organization: Organization):
-        now = timezone.now()
-        with transaction.atomic():
-            record, _ = UsageRecord.objects.select_for_update().get_or_create(
-                organization=organization,
-                year=now.year,
-                month=now.month,
-            )
-            record.documents_uploaded_count = F("documents_uploaded_count") + 1
-            record.save(update_fields=["documents_uploaded_count", "updated_at"])
+        usage_record.documents_uploaded_count += 1
+        usage_record.save()

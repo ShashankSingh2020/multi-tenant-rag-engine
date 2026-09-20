@@ -1,4 +1,5 @@
 import os
+import sys
 from datetime import timedelta
 from pathlib import Path
 import environ
@@ -12,7 +13,7 @@ environ.Env.read_env(os.path.join(BASE_DIR, ".env"))
 
 SECRET_KEY = env("DJANGO_SECRET_KEY")
 DEBUG = env.bool("DJANGO_DEBUG", default=False)
-ALLOWED_HOSTS = env.list("ALLOWED_HOSTS", default=["*"])
+ALLOWED_HOSTS = env.list("DJANGO_ALLOWED_HOSTS", default=["localhost", "127.0.0.1"])
 
 # Application definition
 DJANGO_APPS = [
@@ -29,6 +30,7 @@ THIRD_PARTY_APPS = [
     "rest_framework_simplejwt",
     "corsheaders",
     "drf_spectacular",
+    "pgvector.django",
 ]
 
 LOCAL_APPS = [
@@ -77,10 +79,27 @@ TEMPLATES = [
 WSGI_APPLICATION = "config.wsgi.application"
 ASGI_APPLICATION = "config.asgi.application"
 
-# Database defaults
-DATABASES = {
-    "default": env.db("DATABASE_URL")
-}
+# Database Configuration
+if "pytest" in sys.modules or "test" in sys.argv:
+    # In-memory SQLite database for test suites
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.sqlite3",
+            "NAME": ":memory:",
+        }
+    }
+else:
+    # PostgreSQL with pgvector from DATABASE_URL
+    DATABASES = {
+        "default": env.db(
+            "DATABASE_URL",
+            default="postgres://postgres:postgres@127.0.0.1:5432/multi_tenant_ai_saas",
+            engine="django.db.backends.postgresql",
+        )
+    }
+
+# Custom User Model
+AUTH_USER_MODEL = "accounts.User"
 
 # Password validation
 AUTH_PASSWORD_VALIDATORS = [
@@ -112,8 +131,16 @@ REST_FRAMEWORK = {
     "DEFAULT_PERMISSION_CLASSES": (
         "rest_framework.permissions.IsAuthenticated",
     ),
+    "DEFAULT_THROTTLE_CLASSES": (
+        "rest_framework.throttling.AnonRateThrottle",
+        "rest_framework.throttling.UserRateThrottle",
+    ),
+    "DEFAULT_THROTTLE_RATES": {
+        "anon": "60/minute",
+        "user": "300/minute",
+        "ai_query": "30/minute",
+    },
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
-    "EXCEPTION_HANDLER": "apps.common.exceptions.custom_exception_handler",
 }
 
 # SimpleJWT Settings
@@ -137,37 +164,30 @@ SPECTACULAR_SETTINGS = {
     "SERVE_INCLUDE_SCHEMA": False,
 }
 
-# Redis & Celery settings
+# Redis & Celery Settings
 REDIS_URL = env("REDIS_URL", default="redis://localhost:6379/0")
-CELERY_BROKER_URL = env("CELERY_BROKER_URL", default="redis://localhost:6379/1")
-CELERY_RESULT_BACKEND = env("CELERY_RESULT_BACKEND", default="redis://localhost:6379/2")
+
+if "pytest" in sys.modules or "test" in sys.argv:
+    CELERY_TASK_ALWAYS_EAGER = True
+    CELERY_TASK_EAGER_PROPAGATES = True
+    CELERY_BROKER_URL = "memory://"
+    CELERY_RESULT_BACKEND = "cache+memory://"
+else:
+    CELERY_BROKER_URL = env("CELERY_BROKER_URL", default="redis://localhost:6379/1")
+    CELERY_RESULT_BACKEND = env("CELERY_RESULT_BACKEND", default="redis://localhost:6379/2")
+    CELERY_TASK_ALWAYS_EAGER = False
+
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
 CELERY_TIMEZONE = TIME_ZONE
 
-# AI Settings
-AI_PROVIDER = env("AI_PROVIDER", default="mock")
-OPENAI_API_KEY = env("OPENAI_API_KEY", default="")
-OPENAI_MODEL_NAME = env("OPENAI_MODEL_NAME", default="gpt-4o-mini")
-EMBEDDING_MODEL_NAME = env("EMBEDDING_MODEL_NAME", default="text-embedding-3-small")
+# AI / Provider Settings
+AI_PROVIDER = env("AI_PROVIDER", default="gemini")
+GEMINI_API_KEY = env.str("GEMINI_API_KEY", default="")
+GEMINI_MODEL_NAME = env.str("GEMINI_MODEL_NAME", default="gemini-1.5-flash")
+EMBEDDING_MODEL_NAME = env.str("EMBEDDING_MODEL_NAME", default="text-embedding-004")
 
-AUTH_USER_MODEL = "accounts.User"
-
-# Media files configuration (tenant uploads)
-MEDIA_URL = "/media/"
-MEDIA_ROOT = BASE_DIR / "media"
-
-# OpenAI Settings
 OPENAI_API_KEY = env.str("OPENAI_API_KEY", default="")
 OPENAI_EMBEDDING_MODEL = env.str("OPENAI_EMBEDDING_MODEL", default="text-embedding-3-small")
 OPENAI_CHAT_MODEL = env.str("OPENAI_CHAT_MODEL", default="gpt-4o-mini")
-# Gemini AI Settings
-GEMINI_API_KEY = env.str("GEMINI_API_KEY", default="")
-GEMINI_MODEL_NAME = env.str("GEMINI_MODEL_NAME", default="gemini-1.5-flash")
-EMBEDDING_MODEL_NAME = env.str("EMBEDDING_MODEL_NAME", default="models/text-embedding-004")
-
-CELERY_TASK_ALWAYS_EAGER = True
-CELERY_TASK_EAGER_PROPAGATES = True
-CELERY_BROKER_URL = "memory://"
-CELERY_RESULT_BACKEND = "cache+memory://"
