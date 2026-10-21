@@ -1,6 +1,6 @@
-from django.urls import path
-from apps.usage.views import OrganizationUsageView
+﻿from django.urls import path
+from apps.usage.views import UsageSummaryView
 
 urlpatterns = [
-    path("", OrganizationUsageView.as_view(), name="organization-usage"),
+    path("summary/", UsageSummaryView.as_view(), name="usage-summary"),
 ]

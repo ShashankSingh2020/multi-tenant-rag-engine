@@ -1,25 +1,12 @@
-import streamlit as st
+﻿import streamlit as st
 import requests
-import os
 
-API_BASE_URL = os.getenv(
-    "API_BASE_URL", "https://multi-tenant-rag-engine.onrender.com"
-)
+API_BASE_URL = "http://127.0.0.1:8000/api"
 
-st.set_page_config(
-    page_title="Multi-Tenant AI Knowledge Engine",
-    page_icon="🧠",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+st.set_page_config(page_title="Enterprise AI Engine", page_icon="🧠", layout="wide")
 
-# -----------------------------------------------------------------------------
-# Session State Initialization
-# -----------------------------------------------------------------------------
-if "access_token" not in st.session_state:
-    st.session_state.access_token = None
-if "current_user" not in st.session_state:
-    st.session_state.current_user = None
+if "token" not in st.session_state:
+    st.session_state.token = None
 if "selected_org_id" not in st.session_state:
     st.session_state.selected_org_id = None
 if "selected_project_id" not in st.session_state:
@@ -28,353 +15,210 @@ if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 
 
-def auth_headers():
-    if st.session_state.access_token:
-        return {"Authorization": f"Bearer {st.session_state.access_token}"}
-    return {}
+def get_headers():
+    return {
+        "Authorization": f"Bearer {st.session_state.token}",
+        "Content-Type": "application/json",
+    }
 
 
-# -----------------------------------------------------------------------------
-# Authentication Screen
-# -----------------------------------------------------------------------------
-if not st.session_state.access_token:
-    st.title("🔐 Multi-Tenant Enterprise AI Portal")
-    tab_login, tab_register = st.tabs(["Log In", "Register New Tenant"])
+def auth_view():
+    st.title("🧠 Enterprise AI Engine")
+    mode = st.radio("Choose Mode", ["Login", "Register"], horizontal=True)
 
-    with tab_login:
-        with st.form("login_form"):
-            email = st.text_input("Email")
-            password = st.text_input("Password", type="password")
-            submitted = st.form_submit_button("Sign In")
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        email = st.text_input("Email")
+        password = st.text_input("Password", type="password")
 
-            if submitted:
-                try:
-                    resp = requests.post(
-                        f"{API_BASE_URL}/auth/login/",
-                        json={"email": email, "password": password},
-                    )
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        st.session_state.access_token = data.get("access")
-                        st.session_state.current_user = data.get("user")
-                        st.success("Successfully authenticated!")
-                        st.rerun()
-                    else:
-                        st.error(f"Login failed: {resp.text}")
-                except requests.exceptions.ConnectionError:
-                    st.error("Cannot connect to Django backend. Make sure 'python manage.py runserver' is running on port 8000.")
-
-    with tab_register:
-        with st.form("register_form"):
-            reg_email = st.text_input("Work Email")
-            reg_name = st.text_input("Full Name")
-            reg_pass = st.text_input("Password", type="password")
-            reg_submitted = st.form_submit_button("Register New Tenant")
-
-            if reg_submitted:
-                try:
-                    resp = requests.post(
+        if mode == "Register":
+            password_confirm = st.text_input("Confirm Password", type="password")
+            if st.button("Register Account", use_container_width=True):
+                if password != password_confirm:
+                    st.error("Passwords do not match.")
+                else:
+                    res = requests.post(
                         f"{API_BASE_URL}/auth/register/",
-                        json={"email": reg_email, "full_name": reg_name, "password": reg_pass},
+                        json={
+                            "email": email,
+                            "password": password,
+                            "password_confirm": password_confirm,
+                        },
                     )
-                    if resp.status_code in (200, 201):
-                        st.success("Account created successfully! Please switch to the Log In tab.")
+                    if res.status_code == 201:
+                        st.success("Registration successful! Please login.")
                     else:
-                        st.error(f"Registration failed: {resp.text}")
-                except requests.exceptions.ConnectionError:
-                    st.error("Django backend is offline. Start the server on port 8000.")
+                        st.error(f"Registration failed: {res.text}")
+        else:
+            if st.button("Log In", use_container_width=True):
+                res = requests.post(
+                    f"{API_BASE_URL}/auth/token/",
+                    json={"email": email, "password": password},
+                )
+                if res.status_code == 200:
+                    st.session_state.token = res.json().get("access")
+                    st.success("Logged in!")
+                    st.rerun()
+                else:
+                    st.error("Invalid credentials.")
 
-    st.stop()
 
+def dashboard_view():
+    with st.sidebar:
+        st.title("🏢 Workspace")
+        if st.button("Sign Out"):
+            st.session_state.token = None
+            st.session_state.chat_history = []
+            st.rerun()
 
-# -----------------------------------------------------------------------------
-# Sidebar: Tenant Switcher, Project Switcher, & Plan Specs
-# -----------------------------------------------------------------------------
-with st.sidebar:
-    st.title("🏢 Workspace Controls")
-    user_display = (st.session_state.current_user or {}).get("email", "")
-    st.write(f"User: **{user_display}**")
-
-    if st.button("🚪 Sign Out", use_container_width=True):
-        st.session_state.access_token = None
-        st.session_state.current_user = None
-        st.session_state.selected_org_id = None
-        st.session_state.selected_project_id = None
-        st.session_state.chat_history = []
-        st.rerun()
-
-    st.divider()
-
-    # 1. Select Organization
-    try:
-        orgs_resp = requests.get(f"{API_BASE_URL}/organizations/", headers=auth_headers())
-        org_list = orgs_resp.json() if orgs_resp.status_code == 200 else []
-    except Exception:
-        org_list = []
-
-    if org_list:
-        org_options = {org["name"]: org["id"] for org in org_list}
-        selected_org_name = st.selectbox("Active Organization", list(org_options.keys()))
-        st.session_state.selected_org_id = org_options[selected_org_name]
-    else:
-        st.warning("No organization associated with this account.")
-
-    with st.expander("➕ Create New Organization"):
-        new_org_name = st.text_input("Organization Name", key="new_org_input")
-        if st.button("Create Org") and new_org_name:
-            c_resp = requests.post(
-                f"{API_BASE_URL}/organizations/",
-                json={"name": new_org_name},
-                headers=auth_headers(),
-            )
-            if c_resp.status_code in (200, 201):
-                st.success("Organization created!")
-                st.rerun()
+        # Organization Selection
+        org_res = requests.get(f"{API_BASE_URL}/organizations/", headers=get_headers())
+        if org_res.status_code == 200:
+            orgs = org_res.json().get("results", org_res.json())
+            org_map = {o["name"]: o["id"] for o in orgs}
+            if org_map:
+                chosen_org_name = st.selectbox("Organization", list(org_map.keys()))
+                st.session_state.selected_org_id = org_map[chosen_org_name]
             else:
-                st.error(c_resp.text)
-
-    st.divider()
-
-    # 2. Select Project
-    if st.session_state.selected_org_id:
-        proj_resp = requests.get(
-            f"{API_BASE_URL}/projects/",
-            params={"organization": st.session_state.selected_org_id},
-            headers=auth_headers(),
-        )
-        projects = proj_resp.json() if proj_resp.status_code == 200 else []
-
-        if projects:
-            proj_options = {p["name"]: p["id"] for p in projects}
-            selected_proj_name = st.selectbox("Active Project", list(proj_options.keys()))
-            st.session_state.selected_project_id = proj_options[selected_proj_name]
-        else:
-            st.warning("No projects yet.")
-            st.session_state.selected_project_id = None
-
-        with st.expander("➕ Create New Project"):
-            p_name = st.text_input("Project Name", key="new_proj_name")
-            p_desc = st.text_input("Description", key="new_proj_desc")
-            if st.button("Create Project") and p_name:
-                create_p = requests.post(
-                    f"{API_BASE_URL}/projects/",
-                    json={
-                        "organization": st.session_state.selected_org_id,
-                        "name": p_name,
-                        "description": p_desc,
-                    },
-                    headers=auth_headers(),
-                )
-                if create_p.status_code in (200, 201):
-                    st.success("Project created!")
+                st.info("Create an organization to start.")
+                new_org = st.text_input("Organization Name")
+                if st.button("Create Org"):
+                    requests.post(f"{API_BASE_URL}/organizations/", headers=get_headers(), json={"name": new_org})
                     st.rerun()
+
+        # Scoped Project Selection
+        if st.session_state.selected_org_id:
+            st.markdown("---")
+            proj_res = requests.get(
+                f"{API_BASE_URL}/projects/?organization={st.session_state.selected_org_id}",
+                headers=get_headers(),
+            )
+            if proj_res.status_code == 200:
+                projects = proj_res.json().get("results", proj_res.json())
+                proj_map = {p["name"]: p["id"] for p in projects}
+                if proj_map:
+                    chosen_proj_name = st.selectbox("Project", list(proj_map.keys()))
+                    st.session_state.selected_project_id = proj_map[chosen_proj_name]
                 else:
-                    st.error(create_p.text)
+                    st.info("No projects in this organization.")
+                    new_p = st.text_input("New Project Name")
+                    if st.button("Create Project"):
+                        p_res = requests.post(
+                            f"{API_BASE_URL}/projects/",
+                            headers=get_headers(),
+                            json={"name": new_p, "organization": st.session_state.selected_org_id},
+                        )
+                        if p_res.status_code == 201:
+                            st.rerun()
+                        else:
+                            st.error(p_res.text)
 
+        # Quota Telemetry
+        if st.session_state.selected_org_id:
+            st.markdown("---")
+            st.subheader("📊 Live Quota")
+            usage_res = requests.get(
+                f"{API_BASE_URL}/usage/summary/?organization={st.session_state.selected_org_id}",
+                headers=get_headers(),
+            )
+            if usage_res.status_code == 200:
+                u = usage_res.json()
+                st.caption(f"**Plan**: {u.get('plan_name')}")
+                st.caption(f"**AI Requests**: {u.get('ai_requests_used')} / {u.get('max_ai_requests')}")
+                st.caption(f"**Tokens**: {u.get('tokens_used'):,} / {u.get('max_tokens'):,}")
+                st.caption(f"**Documents**: {u.get('documents_count')} / {u.get('max_documents')}")
 
-# -----------------------------------------------------------------------------
-# Top-Level Persistent Token Counter & Cost-Saver Advice
-# -----------------------------------------------------------------------------
-st.title("🧠 Enterprise AI Knowledge Engine")
+    tab_chat, tab_docs, tab_team, tab_audit = st.tabs(["💬 Chat", "📄 Documents", "👥 Team", "🛡️ Audit"])
 
-if st.session_state.selected_org_id:
-    usage_resp = requests.get(
-        f"{API_BASE_URL}/usage/",
-        params={"org_id": st.session_state.selected_org_id},
-        headers=auth_headers(),
-    )
-    if usage_resp.status_code == 200:
-        usage = usage_resp.json()
-        token_limit = usage.get("token_limit", 50000)
-        tokens_used = usage.get("total_tokens_used", 0)
-        tokens_left = usage.get("remaining_tokens", max(0, token_limit - tokens_used))
+    with tab_chat:
+        if not st.session_state.selected_project_id:
+            st.warning("Select or create a project first.")
+        else:
+            for msg in st.session_state.chat_history:
+                with st.chat_message(msg["role"]):
+                    st.markdown(msg["content"])
+                    if msg.get("sources"):
+                        with st.expander("Sources"):
+                            for s in msg["sources"]:
+                                st.write(f"- {s}")
 
-        req_limit = usage.get("ai_request_limit", 100)
-        reqs_used = usage.get("ai_requests", 0)
-        reqs_left = usage.get("remaining_ai_requests", max(0, req_limit - reqs_used))
+            prompt = st.chat_input("Ask a question about the project documents...")
+            if prompt:
+                st.session_state.chat_history.append({"role": "user", "content": prompt})
+                with st.chat_message("user"):
+                    st.markdown(prompt)
 
-        doc_limit = usage.get("document_limit", 5)
-        docs_used = usage.get("documents_uploaded", 0)
+                with st.chat_message("assistant"):
+                    with st.spinner("Retrieving and synthesizing..."):
+                        r_res = requests.post(
+                            f"{API_BASE_URL}/ai/query/",
+                            headers=get_headers(),
+                            json={
+                                "project_id": st.session_state.selected_project_id,
+                                "prompt": prompt,
+                                "chat_history": st.session_state.chat_history[:-1],
+                            },
+                        )
+                        if r_res.status_code == 200:
+                            data = r_res.json()
+                            ans = data.get("response")
+                            sources = data.get("sources", [])
+                            st.markdown(ans)
+                            if sources:
+                                with st.expander("Sources"):
+                                    for s in sources:
+                                        st.write(f"- {s}")
+                            st.session_state.chat_history.append({"role": "assistant", "content": ans, "sources": sources})
+                        else:
+                            st.error(r_res.text)
 
-        # Dynamic Metrics Row
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("🪙 Tokens Remaining", f"{tokens_left:,}", f"{tokens_used:,} used", delta_color="inverse")
-        m2.metric("⚡ Queries Left", f"{reqs_left}", f"{reqs_used} / {req_limit}")
-        m3.metric("📄 Documents Indexed", f"{docs_used} / {doc_limit}")
-        m4.metric("🛡️ Active Plan", f"{usage.get('plan')}")
-
-        # Proactive Token Saver & Cost Optimization Guide
-        with st.expander("💡 Standard Operating Procedure: How to Reduce AI Token Consumption & Save Money"):
-            st.markdown("""
-            **Best practices to maximize your token quota and avoid unexpected overages:**
-            1. **Target Specific Concepts:** Instead of asking broad prompts like *"Explain this whole PDF"*, ask specific targeted queries like *"List the 3 criteria for simplex transmission"*. Focused prompts produce concise responses, saving completion tokens.
-            2. **Tune Retrieval Depth (`top_k`):** In the chat tab below, lower the chunk retrieval slider to `2` or `3`. Reducing chunks cuts the background context passed to the LLM by up to 60%.
-            3. **Pre-filter Documents:** Clean out document indexes, bibliographies, and disclaimer pages before uploading files so unnecessary vector chunks are not ingested.
-            4. **Avoid Duplicate Indexing:** Search existing documents in the project tab before uploading files already processed by teammates.
-            """)
-        st.divider()
-
-if not st.session_state.selected_project_id:
-    st.info("👈 Please select or create a Project in the sidebar to begin.")
-    st.stop()
-
-
-# -----------------------------------------------------------------------------
-# Main Operational Workspace: Chat, Documents, Audit & Team
-# -----------------------------------------------------------------------------
-tab_chat, tab_docs, tab_team, tab_audit = st.tabs([
-    "💬 Multi-Turn RAG Chat",
-    "📄 Document Management",
-    "👥 Team & Members",
-    "📋 Compliance Audit Logs",
-])
-
-# =============================================================================
-# TAB 1: Multi-Turn RAG Chat
-# =============================================================================
-with tab_chat:
-    c_top1, c_top2 = st.columns([3, 1])
-    with c_top1:
-        st.caption("Query indexed vector embeddings using multi-turn conversational context.")
-    with c_top2:
-        top_k = st.slider("Retrieval Depth (Chunks)", min_value=1, max_value=8, value=3, help="Lower values consume fewer tokens")
-
-    # Render persistent conversation
-    for message in st.session_state.chat_history:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
-            if message.get("sources"):
-                with st.expander("🔍 Referenced Source Chunks"):
-                    for src in message["sources"]:
-                        sim_score = src.get("score") if src.get("score") is not None else src.get("relevance_score", 0)
-                        preview = src.get("content") or src.get("snippet", "")
-                        st.markdown(f"- **{src.get('document_title', 'Document')}** (Similarity Score: `{sim_score:.2f}`)")
-                        st.caption(f"> {preview}")
-
-    user_query = st.chat_input("Ask a question about your project documents...")
-    if user_query:
-        # Prepare recent conversation turns before appending current query
-        history_payload = [
-            {"role": m["role"], "content": m["content"]}
-            for m in st.session_state.chat_history[-4:]
-        ]
-
-        st.session_state.chat_history.append({"role": "user", "content": user_query})
-
-        with st.spinner("Searching vectors and synthesizing answer..."):
-            try:
-                rag_resp = requests.post(
-                    f"{API_BASE_URL}/ai/query/",
-                    json={
-                        "project_id": st.session_state.selected_project_id,
-                        "query": user_query,
-                        "top_k": top_k,
-                        "chat_history": history_payload,
-                    },
-                    headers=auth_headers(),
+    with tab_docs:
+        if st.session_state.selected_project_id:
+            f = st.file_uploader("Upload Document", type=["txt", "pdf", "docx"])
+            if f and st.button("Upload & Ingest"):
+                res = requests.post(
+                    f"{API_BASE_URL}/documents/",
+                    headers={"Authorization": f"Bearer {st.session_state.token}"},
+                    data={"project": st.session_state.selected_project_id, "organization": st.session_state.selected_org_id},
+                    files={"file": (f.name, f.getvalue())},
                 )
-
-                if rag_resp.status_code == 200:
-                    ans_data = rag_resp.json()
-                    answer_text = ans_data.get("answer", "")
-                    sources = ans_data.get("sources", [])
-
-                    st.session_state.chat_history.append({
-                        "role": "assistant",
-                        "content": answer_text,
-                        "sources": sources,
-                    })
-                    # Immediately rerun to refresh top-level usage metrics and render response
-                    st.rerun()
-                elif rag_resp.status_code == 429:
-                    st.error("Quota exceeded! You have exhausted your monthly AI queries or tokens.")
+                if res.status_code == 201:
+                    st.success("Uploaded! Ingestion queued.")
                 else:
-                    st.error(f"Error executing AI query ({rag_resp.status_code}): {rag_resp.text}")
-            except Exception as e:
-                st.error(f"Request failed: {str(e)}")
+                    st.error(res.text)
 
-# =============================================================================
-# TAB 2: Document Management & Ingestion
-# =============================================================================
-with tab_docs:
-    st.subheader("Upload Document for Vectorization")
-    doc_title = st.text_input("Document Title (e.g. Network Layer Specification)")
-    uploaded_file = st.file_uploader("Select file (PDF, TXT, MD)", type=["pdf", "txt", "md"])
+    with tab_team:
+        if st.session_state.selected_org_id:
+            c1, c2 = st.columns(2)
+            with c1:
+                inv_email = st.text_input("Invite Email")
+                inv_role = st.selectbox("Role", ["MEMBER", "ADMIN"])
+                if st.button("Generate Invite"):
+                    res = requests.post(
+                        f"{API_BASE_URL}/organizations/{st.session_state.selected_org_id}/invites/",
+                        headers=get_headers(),
+                        json={"email": inv_email, "role": inv_role},
+                    )
+                    if res.status_code == 201:
+                        st.success(f"Token: `{res.json().get('token')}`")
+                    else:
+                        st.error(res.text)
 
-    if st.button("Upload & Vectorize"):
-        if not doc_title or not uploaded_file:
-            st.warning("Please supply both a document title and a file.")
-        else:
-            with st.spinner("Uploading and running ingestion pipeline..."):
-                files = {"file": (uploaded_file.name, uploaded_file.getvalue())}
-                data = {
-                    "title": doc_title,
-                    "organization_id": st.session_state.selected_org_id,
-                }
-                upload_resp = requests.post(
-                    f"{API_BASE_URL}/documents/project/{st.session_state.selected_project_id}/",
-                    data=data,
-                    files=files,
-                    headers=auth_headers(),
-                )
-                if upload_resp.status_code in (200, 201):
-                    st.success("Document uploaded! Ingestion task completed.")
-                    st.rerun()
-                else:
-                    st.error(f"Upload failed: {upload_resp.text}")
+    with tab_audit:
+        if st.session_state.selected_org_id:
+            a_res = requests.get(
+                f"{API_BASE_URL}/audit/?organization={st.session_state.selected_org_id}",
+                headers=get_headers(),
+            )
+            if a_res.status_code == 200:
+                logs = a_res.json().get("results", a_res.json())
+                for log in logs:
+                    st.text(f"[{log.get('created_at')}] {log.get('action')} - {log.get('resource_type')}")
+            else:
+                st.caption("No audit access or logs found.")
 
-    st.divider()
-    st.subheader("Existing Project Documents")
-    docs_resp = requests.get(
-        f"{API_BASE_URL}/documents/project/{st.session_state.selected_project_id}/",
-        headers=auth_headers(),
-    )
-    if docs_resp.status_code == 200:
-        docs = docs_resp.json()
-        if docs:
-            for d in docs:
-                status = d.get("status", "PENDING")
-                status_color = "🟢" if status == "READY" else ("🔴" if status == "FAILED" else "🟡")
-                st.write(f"{status_color} **{d.get('title')}** — Status: `{status}` — ID: `{d.get('id')}`")
-        else:
-            st.info("No documents uploaded for this project yet.")
 
-# =============================================================================
-# TAB 3: Team & Members (RBAC Management)
-# =============================================================================
-with tab_team:
-    st.subheader("Tenant Members & Roles")
-    st.caption("Manage access control within this organization.")
-
-    with st.form("invite_member_form"):
-        col_m1, col_m2 = st.columns([3, 2])
-        with col_m1:
-            inv_email = st.text_input("Teammate Email")
-        with col_m2:
-            inv_role = st.selectbox("Assign Role", ["MEMBER", "VIEWER", "ADMIN"])
-        invite_submitted = st.form_submit_button("Add Member")
-
-        if invite_submitted and inv_email:
-            st.info(f"Role invitation ready: {inv_email} assigned as {inv_role}. (RBAC records mapped to org context).")
-
-# =============================================================================
-# TAB 4: Compliance Audit Logs
-# =============================================================================
-with tab_audit:
-    st.subheader("Tenant Audit Trail")
-    st.caption("Immutable record of all document uploads, authentication events, and AI queries.")
-
-    audit_resp = requests.get(
-        f"{API_BASE_URL}/audit/",
-        params={"org_id": st.session_state.selected_org_id},
-        headers=auth_headers(),
-    )
-    if audit_resp.status_code == 200:
-        logs = audit_resp.json()
-        if logs:
-            for item in logs:
-                st.markdown(f"📌 **{item.get('action')}** | Triggered by `{item.get('actor')}` at `{item.get('timestamp')}`")
-                st.json(item.get("details", {}))
-                st.divider()
-        else:
-            st.info("No audit logs recorded for this tenant yet.")
+if not st.session_state.token:
+    auth_view()
+else:
+    dashboard_view()

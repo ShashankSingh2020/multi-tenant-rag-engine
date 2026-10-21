@@ -1,131 +1,98 @@
-import io
+﻿import io
 import os
 import pypdf
+import docx
+from django.db import transaction
 import google.generativeai as genai
 from django.conf import settings
-from .models import Document
-from .chunk_models import DocumentChunk
+from apps.documents.models import Document
+from apps.documents.chunk_models import DocumentChunk
 
-
-def extract_text_from_file(file_input, file_type: str = "") -> str:
-    """
-    Extracts text from PDF, TXT, or Markdown.
-    Accepts either a string file path or a file-like object.
-    """
-    text = ""
-    is_path = isinstance(file_input, str) and os.path.exists(file_input)
-    identifier = file_input.lower() if isinstance(file_input, str) else getattr(file_input, "name", "").lower()
-    type_hint = (file_type or "").lower()
-
-    is_pdf = identifier.endswith(".pdf") or "pdf" in type_hint
-
-    if is_pdf:
-        try:
-            if is_path:
-                with open(file_input, "rb") as f:
-                    reader = pypdf.PdfReader(f)
-                    pages = [p.extract_text() or "" for p in reader.pages]
-            else:
-                reader = pypdf.PdfReader(file_input)
-                pages = [p.extract_text() or "" for p in reader.pages]
-            text = "\n\n".join([p for p in pages if p.strip()])
-        except Exception as e:
-            raise RuntimeError(f"Failed to parse PDF: {str(e)}")
-    else:
-        # Text or Markdown file
-        if is_path:
-            with open(file_input, "r", encoding="utf-8", errors="ignore") as f:
-                text = f.read()
-        elif hasattr(file_input, "read"):
-            content = file_input.read()
-            text = content.decode("utf-8", errors="ignore") if isinstance(content, bytes) else str(content)
-        else:
-            text = str(file_input)
-
-    return text.strip()
-
-
-def recursive_chunk_text(text: str, chunk_size: int = 1000, chunk_overlap: int = 150) -> list[str]:
-    """Splits text into overlapping semantic chunks."""
-    if not text:
-        return []
-
-    chunks = []
-    start = 0
-    text_len = len(text)
-
-    while start < text_len:
-        end = start + chunk_size
-        if end >= text_len:
-            chunk = text[start:].strip()
-            if chunk:
-                chunks.append(chunk)
-            break
-
-        split_idx = text.rfind("\n\n", start, end)
-        if split_idx == -1 or split_idx <= start:
-            split_idx = text.rfind(". ", start, end)
-        if split_idx == -1 or split_idx <= start:
-            split_idx = text.rfind("\n", start, end)
-        if split_idx == -1 or split_idx <= start:
-            split_idx = text.rfind(" ", start, end)
-        if split_idx == -1 or split_idx <= start:
-            split_idx = end
-        else:
-            split_idx += 1
-
-        chunk = text[start:split_idx].strip()
-        if chunk:
-            chunks.append(chunk)
-
-        start = max(start + 1, split_idx - chunk_overlap)
-
-    return chunks
-
-
-def generate_batch_embeddings(texts: list[str]) -> list[list[float]]:
-    """Batches chunk embeddings using Gemini API."""
-    if not texts:
-        return []
-
-    api_key = getattr(settings, "GEMINI_API_KEY", "")
-    model_name = getattr(settings, "EMBEDDING_MODEL_NAME", "models/text-embedding-004")
-    if not model_name.startswith("models/"):
-        model_name = f"models/{model_name}"
-
-    genai.configure(api_key=api_key)
-
-    all_embeddings = []
-    batch_size = 50
-
-    for i in range(0, len(texts), batch_size):
-        batch = texts[i : i + batch_size]
-        response = genai.embed_content(
-            model=model_name,
-            content=batch,
-            task_type="retrieval_document"
-        )
-        batch_res = response.get("embedding", [])
-        if batch_res and isinstance(batch_res[0], float):
-            all_embeddings.append(batch_res)
-        else:
-            all_embeddings.extend(batch_res)
-
-    return all_embeddings
+genai.configure(api_key=settings.GEMINI_API_KEY)
 
 
 class DocumentParserService:
-    """Parser service called by tasks.py."""
+    @staticmethod
+    def extract_text(file_obj, filename: str) -> str:
+        if isinstance(file_obj, str):
+            if not os.path.exists(file_obj):
+                return ""
+            with open(file_obj, "rb") as f:
+                raw_bytes = f.read()
+        else:
+            raw_bytes = file_obj.read()
+
+        ext = filename.lower().split(".")[-1]
+        file_stream = io.BytesIO(raw_bytes)
+
+        if ext == "pdf":
+            reader = pypdf.PdfReader(file_stream)
+            text = "\n".join([page.extract_text() or "" for page in reader.pages])
+        elif ext == "docx":
+            doc = docx.Document(file_stream)
+            text = "\n".join([p.text for p in doc.paragraphs if p.text])
+        else:
+            text = raw_bytes.decode("utf-8", errors="ignore")
+        return text.strip()
+
+    @staticmethod
+    def chunk_text(text: str, chunk_size: int = 300, overlap: int = 30, chunk_overlap: int | None = None) -> list[str]:
+        actual_overlap = chunk_overlap if chunk_overlap is not None else overlap
+        words = text.split()
+        if not words:
+            return []
+        chunks = []
+        step = max(1, chunk_size - actual_overlap)
+        for i in range(0, len(words), step):
+            chunk = " ".join(words[i : i + chunk_size])
+            chunks.append(chunk)
+        return chunks
 
     @classmethod
-    def extract_text(cls, file_input, file_type: str = "") -> str:
-        return extract_text_from_file(file_input, file_type)
+    def process_document(cls, document_id: str):
+        doc = Document.objects.select_related("project", "organization").get(id=document_id)
+        doc.status = "PROCESSING"
+        doc.save(update_fields=["status"])
 
-    @classmethod
-    def chunk_text(cls, text: str, chunk_size: int = 1000, chunk_overlap: int = 150, overlap: int = None, **kwargs) -> list[str]:
-        effective_overlap = chunk_overlap if overlap is None else overlap
-        return recursive_chunk_text(text, chunk_size=chunk_size, chunk_overlap=effective_overlap)
+        try:
+            with doc.file.open("rb") as f:
+                raw_text = cls.extract_text(f, doc.file.name)
 
-    @classmethod
-    def generate_embeddings(cls, chunks: list[str]) -> list[list[float]]:
-        return generate_batch_embeddings(chunks)
+            chunks = cls.chunk_text(raw_text, chunk_size=300, chunk_overlap=30)
+            chunk_objects = []
+
+            for idx, chunk_str in enumerate(chunks):
+                embedding_res = genai.embed_content(
+                    model="models/text-embedding-004",
+                    content=chunk_str,
+                    task_type="retrieval_document",
+                )
+                vec = embedding_res["embedding"]
+                chunk_objects.append(
+                    DocumentChunk(
+                        organization=doc.organization,
+                        project=doc.project,
+                        document=doc,
+                        content=chunk_str,
+                        chunk_index=idx,
+                        token_count=len(chunk_str.split()),
+                        embedding=vec,
+                    )
+                )
+
+            with transaction.atomic():
+                DocumentChunk.objects.filter(document=doc).delete()
+                DocumentChunk.objects.bulk_create(chunk_objects)
+                doc.status = "READY"
+                doc.save(update_fields=["status"])
+
+        except Exception:
+            doc.status = "FAILED"
+            doc.save(update_fields=["status"])
+            raise
+
+
+# Backwards-compatible aliases
+extract_text_from_file = DocumentParserService.extract_text
+chunk_text_words = DocumentParserService.chunk_text
+process_document_ingestion = DocumentParserService.process_document

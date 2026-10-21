@@ -1,114 +1,118 @@
-import logging
+﻿from django.db import transaction
+from django.db.models import F
 from django.utils import timezone
-from apps.usage.models import UsageRecord
+from rest_framework.exceptions import Throttled
 from apps.subscriptions.models import Subscription
-
-logger = logging.getLogger(__name__)
+from apps.usage.models import UsageRecord
 
 
 class UsageService:
+    @staticmethod
+    def get_or_create_usage_record(organization_id, for_update: bool = False):
+        now = timezone.now()
+        current_year = now.year
+        current_month = now.month
+
+        qs = UsageRecord.objects.all()
+        if for_update:
+            qs = qs.select_for_update()
+
+        record = qs.filter(
+            organization_id=organization_id,
+            year=current_year,
+            month=current_month,
+        ).first()
+
+        if not record:
+            record, _ = UsageRecord.objects.get_or_create(
+                organization_id=organization_id,
+                year=current_year,
+                month=current_month,
+                defaults={
+                    "total_tokens_used": 0,
+                    "ai_requests_count": 0,
+                    "documents_uploaded_count": 0,
+                },
+            )
+        return record
 
     @classmethod
     def get_organization_usage_summary(cls, organization):
-        """
-        Retrieves current billing cycle usage metrics and plan limits for an organization.
-        Used across views (documents, AI queries) for quota validation and tracking.
-        """
-        if not organization:
-            return {
-                "ai_requests": 0,
-                "ai_request_limit": 100,
-                "remaining_ai_requests": 100,
-                "documents": 0,
-                "document_limit": 10,
-                "remaining_documents": 10,
-                "tokens_used": 0,
-                "plan": "FREE",
-            }
+        org_id = organization.id if hasattr(organization, "id") else organization
+        usage = cls.get_or_create_usage_record(org_id)
+        sub = Subscription.objects.filter(organization_id=org_id).select_related("plan").first()
+        plan = sub.plan if sub else None
 
-        subscription = getattr(organization, "subscription", None)
-        if not subscription:
-            subscription = Subscription.objects.filter(organization=organization, is_active=True).first()
+        max_docs = plan.max_documents if plan else 10
+        docs_used = usage.documents_uploaded_count
+        remaining_docs = max(0, max_docs - docs_used)
 
-        # Plan defaults
-        max_ai_requests = 100
-        max_documents = 10
-        plan_name = "FREE"
+        max_requests = plan.max_ai_requests_per_month if plan else 100
+        requests_used = usage.ai_requests_count
 
-        if subscription and hasattr(subscription, "plan") and subscription.plan:
-            plan = subscription.plan
-            plan_name = getattr(plan, "name", "FREE")
-            max_ai_requests = getattr(plan, "max_ai_requests_per_month", 100)
-            max_documents = getattr(plan, "max_documents", 10)
-
-        now = timezone.now()
-        usage_record = UsageRecord.objects.filter(
-            organization=organization,
-            year=now.year,
-            month=now.month,
-        ).first()
-
-        ai_requests_used = usage_record.ai_requests_count if usage_record else 0
-        documents_used = usage_record.documents_uploaded_count if usage_record else 0
-        tokens_used = usage_record.total_tokens_used if usage_record else 0
+        max_tokens = plan.max_tokens_per_month if plan else 50000
+        tokens_used = usage.total_tokens_used
 
         return {
-            "plan": plan_name,
-            "ai_requests": ai_requests_used,
-            "ai_request_limit": max_ai_requests,
-            "remaining_ai_requests": max(0, max_ai_requests - ai_requests_used),
-            "documents": documents_used,
-            "document_limit": max_documents,
-            "remaining_documents": max(0, max_documents - documents_used),
-            "tokens_used": tokens_used,
+            "plan_name": plan.name if plan else "Free",
+            "ai_requests_count": requests_used,
+            "max_ai_requests": max_requests,
+            "total_tokens_used": tokens_used,
+            "max_tokens": max_tokens,
+            "documents_uploaded_count": docs_used,
+            "max_documents": max_docs,
+            "remaining_documents": remaining_docs,
+            "is_quota_exceeded": (
+                (plan and docs_used >= max_docs)
+                or (plan and requests_used >= max_requests)
+                or (plan and tokens_used >= max_tokens)
+            ),
         }
 
     @classmethod
-    def can_execute_ai_request(cls, organization=None) -> bool:
-        """
-        Pre-flight check: Verifies if the organization has remaining AI requests
-        under their current subscription tier before invoking LLM inference.
-        """
-        if not organization:
+    def check_quota(cls, organization_id, feature: str = "ai_requests", increment: int = 1):
+        usage = cls.get_or_create_usage_record(organization_id)
+        sub = Subscription.objects.filter(organization_id=organization_id).select_related("plan").first()
+        if not sub or not sub.plan:
             return True
 
-        summary = cls.get_organization_usage_summary(organization)
-        return summary["ai_requests"] < summary["ai_request_limit"]
+        if feature == "documents" and (usage.documents_uploaded_count + increment) > sub.plan.max_documents:
+            raise Throttled(detail="Organization maximum document capacity reached.")
+        elif feature == "ai_requests" and (usage.ai_requests_count + increment) > sub.plan.max_ai_requests_per_month:
+            raise Throttled(detail="Organization monthly AI request limit reached.")
+        elif feature == "tokens" and (usage.total_tokens_used + increment) > sub.plan.max_tokens_per_month:
+            raise Throttled(detail="Organization monthly token limit reached.")
+        return True
 
     @classmethod
-    def record_ai_request_usage(cls, organization, tokens_used: int = 0):
-        """Atomically records an AI request and updates token metrics."""
-        if not organization:
-            return
-
-        now = timezone.now()
-        usage_record, _ = UsageRecord.objects.get_or_create(
-            organization=organization,
-            year=now.year,
-            month=now.month,
-        )
-
-        usage_record.ai_requests_count += 1
-        usage_record.total_tokens_used += int(tokens_used or 0)
-        usage_record.save()
+    def record_document_upload(cls, organization_id):
+        with transaction.atomic():
+            usage = cls.get_or_create_usage_record(organization_id, for_update=True)
+            sub = Subscription.objects.filter(organization_id=organization_id).select_related("plan").first()
+            if sub and sub.plan and usage.documents_uploaded_count >= sub.plan.max_documents:
+                raise Throttled(detail="Organization maximum document capacity reached.")
+            UsageRecord.objects.filter(id=usage.id).update(
+                documents_uploaded_count=F("documents_uploaded_count") + 1
+            )
 
     @classmethod
-    def record_ai_request(cls, organization, tokens_used: int = 0):
-        """Alias method for backward compatibility."""
-        return cls.record_ai_request_usage(organization=organization, tokens_used=tokens_used)
+    def record_ai_query(cls, organization_id, tokens_consumed: int = 0):
+        with transaction.atomic():
+            usage = cls.get_or_create_usage_record(organization_id, for_update=True)
+            sub = Subscription.objects.filter(organization_id=organization_id).select_related("plan").first()
+            if sub and sub.plan:
+                if usage.ai_requests_count >= sub.plan.max_ai_requests_per_month:
+                    raise Throttled(detail="Organization monthly AI request limit reached.")
+                if (usage.total_tokens_used + tokens_consumed) > sub.plan.max_tokens_per_month:
+                    raise Throttled(detail="Organization monthly token limit reached.")
 
-    @classmethod
-    def record_document_upload(cls, organization):
-        """Tracks total document uploads against organization limits."""
-        if not organization:
-            return
+            UsageRecord.objects.filter(id=usage.id).update(
+                ai_requests_count=F("ai_requests_count") + 1,
+                total_tokens_used=F("total_tokens_used") + tokens_consumed,
+            )
 
-        now = timezone.now()
-        usage_record, _ = UsageRecord.objects.get_or_create(
-            organization=organization,
-            year=now.year,
-            month=now.month,
-        )
 
-        usage_record.documents_uploaded_count += 1
-        usage_record.save()
+# Backward-compatible function bindings
+get_active_usage_record = UsageService.get_or_create_usage_record
+record_ai_request_usage = UsageService.record_ai_query
+record_document_upload_usage = UsageService.record_document_upload
