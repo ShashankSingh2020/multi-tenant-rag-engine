@@ -3,7 +3,7 @@ from rest_framework.response import Response
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from django.shortcuts import get_object_or_404
 from django.db import IntegrityError
-from apps.organizations.models import Organization, Membership
+from apps.organizations.models import Organization, Membership, MembershipRole
 from apps.projects.models import Project
 from apps.projects.serializers import ProjectSerializer
 
@@ -42,7 +42,6 @@ class ProjectDetailView(generics.RetrieveUpdateDestroyAPIView):
     lookup_field = "id"
 
     def get_object(self):
-        # Support both 'pk' and 'id' url kwargs from urls.py
         lookup_val = self.kwargs.get("id") or self.kwargs.get("pk")
         queryset = self.filter_queryset(self.get_queryset())
         obj = get_object_or_404(queryset, id=lookup_val)
@@ -51,3 +50,12 @@ class ProjectDetailView(generics.RetrieveUpdateDestroyAPIView):
 
     def get_queryset(self):
         return Project.objects.filter(organization__memberships__user=self.request.user).distinct()
+
+    def perform_destroy(self, instance):
+        membership = Membership.objects.filter(
+            organization=instance.organization,
+            user=self.request.user,
+        ).first()
+        if not membership or membership.role not in [MembershipRole.ADMIN, MembershipRole.OWNER]:
+            raise PermissionDenied("Only organization Admins and Owners can delete projects.")
+        instance.delete()

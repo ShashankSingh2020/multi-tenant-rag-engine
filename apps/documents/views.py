@@ -3,7 +3,7 @@ from rest_framework.response import Response
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from django.shortcuts import get_object_or_404
 from apps.projects.models import Project
-from apps.organizations.models import Membership
+from apps.organizations.models import Membership, MembershipRole
 from apps.documents.models import Document
 from apps.documents.serializers import DocumentSerializer
 from apps.usage.services import UsageService
@@ -29,7 +29,6 @@ class DocumentListCreateView(generics.ListCreateAPIView):
         if not Membership.objects.filter(user=request.user, organization=org).exists():
             raise PermissionDenied("You are not a member of the owning organization.")
 
-        # Check quota limit - raises 400 ValidationError with "quota"
         usage = UsageService.get_organization_usage_summary(org)
         if usage.get("remaining_documents", 0) <= 0:
             raise ValidationError("Organization document quota exceeded. Limit reached.")
@@ -72,3 +71,12 @@ class DocumentDetailView(generics.RetrieveDestroyAPIView):
 
     def get_queryset(self):
         return Document.objects.filter(organization__memberships__user=self.request.user)
+
+    def perform_destroy(self, instance):
+        membership = Membership.objects.filter(
+            organization=instance.organization,
+            user=self.request.user,
+        ).first()
+        if not membership or membership.role not in [MembershipRole.ADMIN, MembershipRole.OWNER]:
+            raise PermissionDenied("Only organization Admins and Owners can delete documents.")
+        instance.delete()

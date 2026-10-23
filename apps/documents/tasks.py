@@ -8,6 +8,7 @@ from apps.ai.services import AIService
 
 @shared_task(bind=True, max_retries=3)
 def process_document_ingestion_task(self, document_id: str):
+    doc = None
     try:
         doc = Document.objects.select_related("organization", "project").get(id=document_id)
         doc.status = DocumentStatus.PROCESSING
@@ -22,10 +23,12 @@ def process_document_ingestion_task(self, document_id: str):
             return f"Doc {document_id} successfully indexed: empty content."
 
         chunks = DocumentParserService.chunk_text(raw_text, chunk_size=300, chunk_overlap=30)
+        
+        # Batch vector embeddings with retrieval_document task type
+        embeddings = AIService.get_batch_embeddings(chunks, task_type="retrieval_document")
+        
         chunk_objects = []
-
-        for idx, chunk_str in enumerate(chunks):
-            vec = AIService.generate_embeddings(chunk_str, task_type="retrieval_document")
+        for idx, (chunk_str, vec) in enumerate(zip(chunks, embeddings)):
             chunk_objects.append(
                 DocumentChunk(
                     organization=doc.organization,
@@ -46,8 +49,6 @@ def process_document_ingestion_task(self, document_id: str):
         return f"Doc {document_id} successfully indexed: {len(chunk_objects)} chunks created."
 
     except Exception as exc:
-        doc = Document.objects.filter(id=document_id).first()
-        if doc:
-            doc.status = DocumentStatus.FAILED
-            doc.save(update_fields=["status", "updated_at"])
+        if doc or Document.objects.filter(id=document_id).exists():
+            Document.objects.filter(id=document_id).update(status=DocumentStatus.FAILED)
         raise self.retry(exc=exc, countdown=10)
