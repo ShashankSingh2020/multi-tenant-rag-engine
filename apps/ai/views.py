@@ -1,129 +1,51 @@
-import logging
-import inspect
-from rest_framework.views import APIView
+﻿from rest_framework import views, status, permissions
 from rest_framework.response import Response
-from rest_framework import status, permissions
-from apps.ai.services import AIService
-from apps.usage.services import UsageService
-from apps.audit.services import AuditService
+from rest_framework.exceptions import PermissionDenied
+from django.shortcuts import get_object_or_404
 from apps.projects.models import Project
-from apps.common.throttling import TenantAIRateThrottle
-
-logger = logging.getLogger(__name__)
-
-
-def safe_audit_log(actor_user, organization, action_name, metadata):
-    """Dynamically invokes AuditService matching its exact signature without errors."""
-    target_func = None
-    inst = None
-
-    for name in ["log_event", "log_action", "create_log", "log"]:
-        if hasattr(AuditService, name):
-            target_func = getattr(AuditService, name)
-            break
-
-    if not target_func:
-        try:
-            inst = AuditService()
-            for name in ["log_event", "log_action", "create_log", "log"]:
-                if hasattr(inst, name):
-                    target_func = getattr(inst, name)
-                    break
-        except Exception:
-            pass
-
-    if not target_func:
-        return
-
-    try:
-        sig = inspect.signature(target_func)
-        param_names = list(sig.parameters.keys())
-        kwargs = {}
-
-        for p in param_names:
-            if p in ["user", "actor"]:
-                kwargs[p] = actor_user
-            elif p in ["organization", "org"]:
-                kwargs[p] = organization
-            elif p in ["action", "event_type", "event"]:
-                kwargs[p] = action_name
-            elif p in ["details", "metadata", "extra", "data"]:
-                kwargs[p] = metadata
-
-        target_func(**kwargs)
-    except Exception as e:
-        logger.warning(f"Audit log bypassed: {e}")
+from apps.organizations.models import Membership
+from apps.usage.services import UsageService
+from apps.ai.services import AIService
+from apps.ai.serializers import AIQuerySerializer
 
 
-def safe_record_usage(organization, tokens_used):
-    """Safely invokes UsageService to record token consumption and query count."""
-    try:
-        UsageService.record_ai_request_usage(organization=organization, tokens_used=tokens_used)
-    except Exception as e:
-        logger.warning(f"Usage recording failed: {e}")
-
-
-class RAGQueryView(APIView):
+class AIQueryView(views.APIView):
     permission_classes = [permissions.IsAuthenticated]
-    throttle_classes = [TenantAIRateThrottle]
 
     def post(self, request, *args, **kwargs):
-        project_id = request.data.get("project_id")
-        query = request.data.get("query")
-        top_k = int(request.data.get("top_k", 3))
-        chat_history = request.data.get("chat_history", [])
+        # Support project_id passed either in URL kwargs or request body
+        data = request.data.copy() if hasattr(request.data, "copy") else dict(request.data)
+        if "project_id" in kwargs and "project_id" not in data:
+            data["project_id"] = kwargs["project_id"]
 
-        if not project_id or not query:
-            return Response(
-                {"error": "Both 'project_id' and 'query' are required fields."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        serializer = AIQuerySerializer(data=data)
+        serializer.is_valid(raise_exception=True)
+        validated = serializer.validated_data
 
-        # 1. Project Tenant Isolation Verification
-        try:
-            project = Project.objects.select_related("organization").get(
-                id=project_id,
-                organization__memberships__user=request.user,
-            )
-        except Project.DoesNotExist:
-            return Response(
-                {"error": "Project not found or access denied."},
-                status=status.HTTP_404_NOT_FOUND,
-            )
+        project_id = validated["project_id"]
+        query_text = validated["query_text"]
+        chat_history = validated.get("chat_history", [])
+        top_k = validated.get("top_k", 5)
 
+        project = get_object_or_404(Project, id=project_id)
         org = project.organization
 
-        # 2. Check Quota Usage (Pre-flight Gate)
-        if not UsageService.can_execute_ai_request(org):
-            return Response(
-                {"error": "AI request quota exceeded for the current billing period."},
-                status=status.HTTP_429_TOO_MANY_REQUESTS,
-            )
+        if not Membership.objects.filter(user=request.user, organization=org).exists():
+            raise PermissionDenied("You are not authorized to query this project.")
 
-        # 3. Vector Retrieval & Synthesis via Gemini
-        ai_service = AIService()
-        result = ai_service.query_project_knowledge_base(
-            project=project,
-            query=query,
-            top_k=top_k,
+        UsageService.check_quota(organization_id=org.id, feature="ai_requests", increment=1)
+
+        result = AIService.query_rag(
+            project_id=project.id,
+            organization_id=org.id,
+            query_text=query_text,
+            user=request.user,
             chat_history=chat_history,
-        )
-
-        # 4. Record Token Consumption & Decrement Quota
-        tokens_consumed = result.get("total_tokens", 0)
-        safe_record_usage(organization=org, tokens_used=tokens_consumed)
-
-        # 5. Clean Audit Log Registration
-        safe_audit_log(
-            actor_user=request.user,
-            organization=org,
-            action_name="AI_QUERY_EXECUTED",
-            metadata={
-                "project_id": str(project.id),
-                "query": query,
-                "tokens_consumed": tokens_consumed,
-                "sources_matched": len(result.get("sources", [])),
-            },
+            top_k=top_k,
         )
 
         return Response(result, status=status.HTTP_200_OK)
+
+
+# Alias for backward-compatibility with existing url patterns
+RAGQueryView = AIQueryView

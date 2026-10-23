@@ -1,20 +1,13 @@
-import logging
+﻿import os
 from celery import shared_task
-from django.db import transaction
 from apps.documents.models import Document, DocumentStatus
 from apps.documents.chunk_models import DocumentChunk
 from apps.documents.services import DocumentParserService
 from apps.ai.services import AIService
 
-logger = logging.getLogger(__name__)
-
 
 @shared_task(bind=True, max_retries=3)
 def process_document_ingestion_task(self, document_id: str):
-    """
-    Asynchronous Celery task to parse uploaded files, chunk text,
-    generate Gemini vector embeddings, and store them in pgvector.
-    """
     try:
         doc = Document.objects.select_related("organization", "project").get(id=document_id)
         doc.status = DocumentStatus.PROCESSING
@@ -26,45 +19,35 @@ def process_document_ingestion_task(self, document_id: str):
         if not raw_text or not raw_text.strip():
             doc.status = DocumentStatus.READY
             doc.save(update_fields=["status", "updated_at"])
-            return f"Doc {document_id} processed: empty content."
+            return f"Doc {document_id} successfully indexed: empty content."
 
         chunks = DocumentParserService.chunk_text(raw_text, chunk_size=300, chunk_overlap=30)
-        chunk_instances = []
-        ai_service = AIService()
+        chunk_objects = []
 
-        for idx, chunk_content in enumerate(chunks):
-            embedding = ai_service.get_embedding(chunk_content)
-            token_count = len(chunk_content.split())
-            chunk_instances.append(
+        for idx, chunk_str in enumerate(chunks):
+            vec = AIService.generate_embeddings(chunk_str, task_type="retrieval_document")
+            chunk_objects.append(
                 DocumentChunk(
                     organization=doc.organization,
                     project=doc.project,
                     document=doc,
+                    content=chunk_str,
                     chunk_index=idx,
-                    content=chunk_content,
-                    token_count=token_count,
-                    embedding=embedding,
+                    token_count=len(chunk_str.split()),
+                    embedding=vec,
                 )
             )
 
-        with transaction.atomic():
-            DocumentChunk.objects.filter(document=doc).delete()
-            DocumentChunk.objects.bulk_create(chunk_instances)
+        DocumentChunk.objects.filter(document=doc).delete()
+        DocumentChunk.objects.bulk_create(chunk_objects)
 
-            doc.status = DocumentStatus.READY
-            doc.error_message = None
-            doc.save(update_fields=["status", "error_message", "updated_at"])
-
-        logger.info(f"Doc {document_id} successfully indexed {len(chunk_instances)} chunks.")
-        return f"Doc {document_id} successfully indexed {len(chunk_instances)} chunks."
+        doc.status = DocumentStatus.READY
+        doc.save(update_fields=["status", "updated_at"])
+        return f"Doc {document_id} successfully indexed: {len(chunk_objects)} chunks created."
 
     except Exception as exc:
-        logger.error(f"Error ingesting document {document_id}: {exc}", exc_info=True)
-        try:
-            doc = Document.objects.get(id=document_id)
+        doc = Document.objects.filter(id=document_id).first()
+        if doc:
             doc.status = DocumentStatus.FAILED
-            doc.error_message = str(exc)
-            doc.save(update_fields=["status", "error_message", "updated_at"])
-        except Exception:
-            pass
+            doc.save(update_fields=["status", "updated_at"])
         raise self.retry(exc=exc, countdown=10)

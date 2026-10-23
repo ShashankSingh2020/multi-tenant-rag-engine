@@ -191,3 +191,7 @@ EMBEDDING_MODEL_NAME = env.str("EMBEDDING_MODEL_NAME", default="text-embedding-0
 OPENAI_API_KEY = env.str("OPENAI_API_KEY", default="")
 OPENAI_EMBEDDING_MODEL = env.str("OPENAI_EMBEDDING_MODEL", default="text-embedding-3-small")
 OPENAI_CHAT_MODEL = env.str("OPENAI_CHAT_MODEL", default="gpt-4o-mini")
+if "rest_framework_simplejwt.token_blacklist" not in INSTALLED_APPS:
+    INSTALLED_APPS.append("rest_framework_simplejwt.token_blacklist")
+
+REST_FRAMEWORK["EXCEPTION_HANDLER"] = "apps.common.exceptions.custom_exception_handler"

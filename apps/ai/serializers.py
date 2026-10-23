@@ -1,22 +1,19 @@
-from rest_framework import serializers
+﻿from rest_framework import serializers
 
-
-class RAGQueryRequestSerializer(serializers.Serializer):
+class AIQuerySerializer(serializers.Serializer):
     project_id = serializers.UUIDField(required=True)
-    query = serializers.CharField(required=True, min_length=3, max_length=1000)
-    top_k = serializers.IntegerField(required=False, default=4, min_value=1, max_value=10)
+    query = serializers.CharField(required=False)
+    prompt = serializers.CharField(required=False)
+    chat_history = serializers.ListField(
+        child=serializers.DictField(),
+        required=False,
+        default=list,
+    )
+    top_k = serializers.IntegerField(required=False, default=5, min_value=1, max_value=20)
 
-
-class SourceChunkSerializer(serializers.Serializer):
-    document_id = serializers.UUIDField()
-    document_title = serializers.CharField()
-    chunk_index = serializers.IntegerField()
-    relevance_score = serializers.FloatField()
-    snippet = serializers.CharField()
-
-
-class RAGQueryResponseSerializer(serializers.Serializer):
-    query = serializers.CharField()
-    answer = serializers.CharField()
-    sources = SourceChunkSerializer(many=True)
-    tokens_consumed = serializers.IntegerField()
+    def validate(self, attrs):
+        query_text = attrs.get("query") or attrs.get("prompt")
+        if not query_text:
+            raise serializers.ValidationError({"query": "A query or prompt is required."})
+        attrs["query_text"] = query_text
+        return attrs

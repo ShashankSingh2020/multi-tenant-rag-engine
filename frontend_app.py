@@ -1,7 +1,8 @@
-﻿import streamlit as st
+﻿import os
+import streamlit as st
 import requests
 
-API_BASE_URL = "http://127.0.0.1:8000/api"
+API_BASE_URL = os.environ.get("API_BASE_URL", "http://127.0.0.1:8000/api").rstrip("/")
 
 st.set_page_config(page_title="Enterprise AI Engine", page_icon="🧠", layout="wide")
 
@@ -26,7 +27,7 @@ def auth_view():
     st.title("🧠 Enterprise AI Engine")
     mode = st.radio("Choose Mode", ["Login", "Register"], horizontal=True)
 
-    col1, col2 = st.columns([1, 1])
+    col1, _ = st.columns([1, 1])
     with col1:
         email = st.text_input("Email")
         password = st.text_input("Password", type="password")
@@ -51,12 +52,14 @@ def auth_view():
                         st.error(f"Registration failed: {res.text}")
         else:
             if st.button("Log In", use_container_width=True):
-                res = requests.post(
-                    f"{API_BASE_URL}/auth/token/",
-                    json={"email": email, "password": password},
-                )
+                # Try standard /auth/login/ then fallback to /auth/token/
+                res = requests.post(f"{API_BASE_URL}/auth/login/", json={"email": email, "password": password})
+                if res.status_code != 200:
+                    res = requests.post(f"{API_BASE_URL}/auth/token/", json={"email": email, "password": password})
+
                 if res.status_code == 200:
-                    st.session_state.token = res.json().get("access")
+                    data = res.json()
+                    st.session_state.token = data.get("access") or data.get("token")
                     st.success("Logged in!")
                     st.rerun()
                 else:
@@ -124,9 +127,9 @@ def dashboard_view():
             if usage_res.status_code == 200:
                 u = usage_res.json()
                 st.caption(f"**Plan**: {u.get('plan_name')}")
-                st.caption(f"**AI Requests**: {u.get('ai_requests_used')} / {u.get('max_ai_requests')}")
-                st.caption(f"**Tokens**: {u.get('tokens_used'):,} / {u.get('max_tokens'):,}")
-                st.caption(f"**Documents**: {u.get('documents_count')} / {u.get('max_documents')}")
+                st.caption(f"**AI Requests**: {u.get('ai_requests_used', 0)} / {u.get('max_ai_requests', 0)}")
+                st.caption(f"**Tokens**: {u.get('tokens_used', 0):,} / {u.get('max_tokens', 0):,}")
+                st.caption(f"**Documents**: {u.get('documents_count', 0)} / {u.get('max_documents', 0)}")
 
     tab_chat, tab_docs, tab_team, tab_audit = st.tabs(["💬 Chat", "📄 Documents", "👥 Team", "🛡️ Audit"])
 
@@ -142,11 +145,11 @@ def dashboard_view():
                             for s in msg["sources"]:
                                 st.write(f"- {s}")
 
-            prompt = st.chat_input("Ask a question about the project documents...")
-            if prompt:
-                st.session_state.chat_history.append({"role": "user", "content": prompt})
+            user_query = st.chat_input("Ask a question about the project documents...")
+            if user_query:
+                st.session_state.chat_history.append({"role": "user", "content": user_query})
                 with st.chat_message("user"):
-                    st.markdown(prompt)
+                    st.markdown(user_query)
 
                 with st.chat_message("assistant"):
                     with st.spinner("Retrieving and synthesizing..."):
@@ -155,13 +158,13 @@ def dashboard_view():
                             headers=get_headers(),
                             json={
                                 "project_id": st.session_state.selected_project_id,
-                                "prompt": prompt,
+                                "query": user_query,
                                 "chat_history": st.session_state.chat_history[:-1],
                             },
                         )
                         if r_res.status_code == 200:
                             data = r_res.json()
-                            ans = data.get("response")
+                            ans = data.get("response", "")
                             sources = data.get("sources", [])
                             st.markdown(ans)
                             if sources:
@@ -177,9 +180,9 @@ def dashboard_view():
             f = st.file_uploader("Upload Document", type=["txt", "pdf", "docx"])
             if f and st.button("Upload & Ingest"):
                 res = requests.post(
-                    f"{API_BASE_URL}/documents/",
+                    f"{API_BASE_URL}/documents/project/{st.session_state.selected_project_id}/",
                     headers={"Authorization": f"Bearer {st.session_state.token}"},
-                    data={"project": st.session_state.selected_project_id, "organization": st.session_state.selected_org_id},
+                    data={"title": f.name},
                     files={"file": (f.name, f.getvalue())},
                 )
                 if res.status_code == 201:
@@ -189,7 +192,7 @@ def dashboard_view():
 
     with tab_team:
         if st.session_state.selected_org_id:
-            c1, c2 = st.columns(2)
+            c1, _ = st.columns(2)
             with c1:
                 inv_email = st.text_input("Invite Email")
                 inv_role = st.selectbox("Role", ["MEMBER", "ADMIN"])
@@ -206,14 +209,15 @@ def dashboard_view():
 
     with tab_audit:
         if st.session_state.selected_org_id:
+            # Backend accepts both ?org_id= and ?organization=
             a_res = requests.get(
-                f"{API_BASE_URL}/audit/?organization={st.session_state.selected_org_id}",
+                f"{API_BASE_URL}/audit/?org_id={st.session_state.selected_org_id}",
                 headers=get_headers(),
             )
             if a_res.status_code == 200:
                 logs = a_res.json().get("results", a_res.json())
                 for log in logs:
-                    st.text(f"[{log.get('created_at')}] {log.get('action')} - {log.get('resource_type')}")
+                    st.text(f"[{log.get('created_at')}] {log.get('action')} - {log.get('actor') or log.get('ip_address')}")
             else:
                 st.caption("No audit access or logs found.")
 
