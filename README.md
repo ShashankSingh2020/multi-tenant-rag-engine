@@ -107,7 +107,7 @@ sequenceDiagram
 
     U->>A: POST /api/ai/query/ (project_id, query, top_k, chat_history)
     A->>D: Verify membership in the project's organization
-    A->>D: Reserve one request (row-locked; 429 if limit reached)
+    A->>D: Reserve one request (row-locked, 429 if limit reached)
     A->>D: Cosine search on chunks WHERE project AND organization match
     A->>G: Retrieved context + chat history + question
     G-->>A: Answer + token usage
